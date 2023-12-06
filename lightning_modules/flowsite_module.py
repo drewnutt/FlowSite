@@ -1,4 +1,4 @@
-
+import csv
 import time
 
 import torch, wandb, os, copy
@@ -13,10 +13,11 @@ from torch_scatter import scatter_mean, scatter_add
 
 from utils.featurize import atom_features_list
 from utils.logging import lg
+from utils.mmcif import RESTYPES
 
 from utils.train_utils import compute_rmsds, supervised_chi_loss, get_blosum_score, get_cooccur_score, \
     get_recovered_aa_angle_loss, get_unnorm_blosum_score
-from utils.visualize import save_trajectory_pdb
+from utils.visualize import  save_trajectory_pdb
 
 
 def gather_log(log, world_size):
@@ -28,7 +29,7 @@ def gather_log(log, world_size):
     return log
 
 class FlowSiteModule(GeneralModule):
-    def __init__(self, args, device, model, train_data):
+    def __init__(self, args, device, model, train_data=None):
         super().__init__(args, device, model)
         os.makedirs(os.environ["MODEL_DIR"], exist_ok=True)
         self.args = args
@@ -44,7 +45,6 @@ class FlowSiteModule(GeneralModule):
         if args.fake_ratio_start > 0:
             decay = torch.optim.lr_scheduler.LinearLR(self.fake_ratio_storage, start_factor=args.fake_ratio_start, end_factor=args.fake_ratio_end, total_iters=args.fake_decay_dur)
             self.fake_ratio_scheduler = torch.optim.lr_scheduler.SequentialLR(self.fake_ratio_storage,schedulers=[self.fake_ratio_scheduler, decay], milestones=[args.fake_constant_dur])
-
     def on_save_checkpoint(self, checkpoint):
         checkpoint['fake_ratio_scheduler'] = self.fake_ratio_scheduler
         checkpoint['fake_ratio_storage'] = self.fake_ratio_storage
@@ -52,7 +52,8 @@ class FlowSiteModule(GeneralModule):
         if 'fake_ratio_scheduler' in checkpoint:
             self.fake_ratio_scheduler = checkpoint['fake_ratio_scheduler']
             self.fake_ratio_storage = checkpoint['fake_ratio_storage']
-            self.train_data.fake_lig_ratio = self.fake_ratio_storage.param_groups[0]['lr']
+            if self.train_data is not None:
+                self.train_data.fake_lig_ratio = self.fake_ratio_storage.param_groups[0]['lr']
 
     def training_step(self, batch, batch_idx):
         self.stage = "train"
@@ -72,7 +73,6 @@ class FlowSiteModule(GeneralModule):
         for i in range(self.args.num_inference):
             batch_copy = copy.deepcopy(batch)
             out.append(self.general_step(batch_copy, batch_idx))
-        self.print_iter_log()
         return torch.tensor(out).mean()
 
     def print_iter_log(self):
@@ -205,6 +205,7 @@ class FlowSiteModule(GeneralModule):
 
         with torch.no_grad():
             self.lg("num_res", (batch.protein_size.cpu().numpy()))
+            self.lg("batch_idx", [batch_idx]*len(batch.pdb_id))
             self.lg("num_ligs", (batch.num_ligs.cpu().numpy()))
             self.lg("num_designable", ((scatter_add(batch['protein'].designable_mask.int(), batch['protein'].batch)).cpu().numpy()))
             self.lg("lig_size", (batch['ligand'].size).cpu().numpy())
@@ -278,10 +279,12 @@ class FlowSiteModule(GeneralModule):
                     self.lg('all_res_cooccur_score', all_res_cooccur_score.cpu().numpy())
                     self.lg('allmean_accuracy', allmean_accuracy.cpu().numpy())
                     self.lg('allmean_all_res_accuracy', allmean_all_res_accuracy.cpu().numpy())
+
             batch.logs['metric_calculation_time'] = time.time() - start_time2
             batch.logs['general_step_time'] = time.time() - start_time
             for k, v in batch.logs.items():
                 self.lg(k, np.array([v]))
+            batch.logs = {}
         return loss.mean()
 
     def log_3D_metrics(self, rmsd, centroid_rmsd, kabsch_rmsd, suffix=""):
@@ -302,7 +305,7 @@ class FlowSiteModule(GeneralModule):
 
 
     @torch.no_grad()
-    def flow_match_inference(self, batch, batch_idx=None):
+    def flow_match_inference(self, batch, batch_idx=None, production_mode = False):
         # be careful, the meaning of x0 and x1 is reversed here in flow matching compared to diffusion
 
         x0 = sample_prior(batch, self.args.prior_scale , harmonic=not self.args.gaussian_prior)
@@ -344,9 +347,9 @@ class FlowSiteModule(GeneralModule):
             if steps < len(t_span) - 1: dt = t_span[steps + 1] - t
             steps += 1
 
-        if self.args.save_inference and batch_idx == 0 and (self.inference_counter % self.args.inference_save_freq == 0 or self.stage == "pred"):
+        if self.args.save_inference and (batch_idx == 0 or self.args.save_all_batches) and self.inference_counter % self.args.inference_save_freq == 0 or self.stage == "pred" and self.args.save_inference and self.args.save_all_batches:
             self.inference_counter = 0
-            save_trajectory_pdb(self.args, batch, sol, model_pred, extra_string=f'{self.stage}_{self.trainer.global_step}globalStep')
+            save_trajectory_pdb(self.args, batch, sol, model_pred, extra_string=f'{self.stage}_{self.trainer.global_step}globalStep', production_mode=production_mode, out_dir=os.path.join(self.args.out_dir, 'structures') if production_mode else None)
         return x1_pred, xt, res_pred
 
     @torch.no_grad()
@@ -358,7 +361,7 @@ class FlowSiteModule(GeneralModule):
         ts = times01 ** 2 * sde.max_t()
         bid = batch["ligand"].batch
 
-        noise = torch.randn_like(batch["ligand"].pos) 
+        noise = torch.randn_like(batch["ligand"].pos)
         xt = batch.P @ (noise / torch.sqrt(batch.D)[:,None])
         if self.args.self_condition_inv:
             batch['protein'].input_feat = batch['protein'].feat * 0 + len(atom_features_list['residues_canonical'])
@@ -400,7 +403,7 @@ class FlowSiteModule(GeneralModule):
             sol.append(xt)
             model_pred.append(x0)
 
-        if self.args.save_inference and batch_idx == 0 and self.inference_counter % self.args.inference_save_freq == 0:
+        if self.args.save_inference and (batch_idx == 0 or self.args.save_all_batches) and self.inference_counter % self.args.inference_save_freq == 0 or self.stage == "pred" and self.args.save_inference and self.args.save_all_batches:
             self.inference_counter = 0
             save_trajectory_pdb(self.args, batch, sol, model_pred, extra_string=f'{self.stage}_{self.trainer.global_step}globalStep')
         return x0, xt, res_pred
@@ -436,27 +439,124 @@ class FlowSiteModule(GeneralModule):
         out = {}
         out['trainer/global_step'] = float(self.trainer.global_step)
         out['epoch'] = float(self.trainer.current_epoch)
-        out['fake_lig_ratio'] = float(self.train_data.fake_lig_ratio)
+        if self.train_data is not None:
+            out['fake_lig_ratio'] = float(self.train_data.fake_lig_ratio)
 
-        for key, value in log.items():
-            if 'rmsd' in key:
+        temporary_log = {}
+        aggregated_log = {}
+        if self.stage == "pred" and not 'iter_name' in list(log.keys()):
+            for key, value in log.items():
+                if isinstance(value, list) and len(value) == len(log['pred_num_res']):
+                    aggregated_list = []
+                    for i in range(max(log['pred_batch_idx']) + 1):
+                        values_for_batch = np.array(value)[np.where(np.array(log['pred_batch_idx']) == i)[0]]
+                        aggregated_list.append(values_for_batch.reshape(self.args.num_inference, -1))
+                    temporary_log[key] = np.concatenate(aggregated_list, axis=1)
+                else:
+                    aggregated_log[key] = value
+
+            for key, value in temporary_log.items():
+                if 'rmsd' in key and not '_std' in key:
+                    pass
+                top10_rmsd_order = np.argsort(temporary_log['pred_rmsd'][:10], axis=0)
+                top5_rmsd_order = np.argsort(temporary_log['pred_rmsd'][:5], axis=0)
+                aggregated_log[key + '_msdTop10'] = np.take_along_axis(temporary_log[key][:10], top10_rmsd_order, axis=0)[0]
+                aggregated_log[key + '_msdTop5'] = np.take_along_axis(temporary_log[key][:5], top5_rmsd_order, axis=0)[0]
+                if self.args.residue_loss_weight > 0:
+                    top10_aar_order = np.argsort(temporary_log['pred_accuracy'][:10], axis=0)[::-1]
+                    top5_aar_order = np.argsort(temporary_log['pred_accuracy'][:5], axis=0)[::-1]
+                    aggregated_log[key + '_aarTop10'] = np.take_along_axis(temporary_log[key][:10], top10_aar_order, axis=0)[:10][0]
+                    aggregated_log[key + '_aarTop5'] = np.take_along_axis(temporary_log[key][:5], top5_aar_order, axis=0)[:5][0]
+                try:
+                    aggregated_log[key] = log[key]
+                    aggregated_log[key + '_std'] = temporary_log[key].std(axis=0)
+                except:
+                    pass
+        else:
+            aggregated_log = log
+
+        for key, value in aggregated_log.items():
+            if 'rmsd' in key and not '_std' in key:
                 out[key + '_median'] = np.median(np.array(value)[np.isfinite(value)])
-        for key in log:
+        for key in aggregated_log:
             try:
-                out[key] = np.mean(log[key])
+                out[key] = np.mean(aggregated_log[key])
             except:
                 pass
         return out
+
+    def predict_step(self, batch, batch_idx, dataloader_idx=0):
+        self.stage = "pred"
+        logs = {}
+        batch.logs = logs
+        prot_bid = batch['protein'].batch.cpu()
+        full_prot_bid = batch['full_protein'].batch.cpu()
+        designed_seqs = []
+        designed_res_list = []
+        logit_seqs = []
+        logit_res_list = []
+        resid_chainid_list = []
+        for i in range(self.args.num_inference):
+            batch_ = copy.deepcopy(batch)
+            if self.args.flow_matching:
+                x1_out, x1, res_pred = self.flow_match_inference(batch_, batch_idx, production_mode=True)
+            else:
+                x1_out, x1, res_pred = self.harmonic_inference(batch_, batch_idx)
+            full_designed_mask = torch.logical_and(batch['full_protein'].designable_mask, batch['full_protein'].pocket_mask)
+            assert full_designed_mask.sum() == batch['protein'].designable_mask.sum()
+
+            # get the full sequence with the designed residues inserted
+            designed_seq = batch['full_protein'].aatype_num.clone()
+            designed_res = torch.argmax(res_pred[batch['protein'].designable_mask], dim=1)
+            if (designed_res == len(RESTYPES)).any():
+                print('Warning: miscallenaeous token predicted, not including that in the redesigned sequence')
+            designed_res[designed_res == len(RESTYPES)] = batch['protein'].aatype_num[batch['protein'].designable_mask][designed_res == len(RESTYPES)] # do not redisign residues if miscallenaeous token is predicted
+            designed_seq[full_designed_mask] = designed_res
+            designed_seqs.append([np.array(RESTYPES)[designed_seq.cpu().numpy()][torch.where(full_prot_bid == i)] for i in range(len(batch.pdb_id))])
+
+            # get the full sequence of logitidences/logits with the designed residues inserted
+            logit_seq = np.zeros((len(batch['full_protein'].pos), len(atom_features_list['residues_canonical'])))
+            logit_seq[full_designed_mask.cpu()] = res_pred[batch['protein'].designable_mask].cpu().numpy()
+            logit_seqs.append([logit_seq[torch.where(full_prot_bid == i)] for i in range(len(batch.pdb_id))])
+
+            # get the individual designed residues / logitidences
+            designed_res_list.append([np.array(RESTYPES)[designed_res.cpu().numpy()][torch.where(prot_bid[batch['protein'].designable_mask.cpu()] == i)] for i in range(len(batch.pdb_id))])
+            logit_res_list.append([res_pred[batch['protein'].designable_mask].cpu().numpy()[torch.where(prot_bid[batch['protein'].designable_mask.cpu()] == i)] for i in range(len(batch.pdb_id))])
+            chain_id_letters = np.array(list('ACDEFGHIKLMNPQRSTVWY'))[batch['protein'].pdb_chain_id[batch['protein'].designable_mask.cpu()].cpu().numpy()]
+            res_id_chars = batch['protein'].pdb_res_id[batch['protein'].designable_mask].cpu().numpy().astype(str)
+            resid_chainid_list.append([np.char.add(chain_id_letters,res_id_chars)[torch.where(prot_bid[batch['protein'].designable_mask.cpu()] == i)] for i in range(len(batch.pdb_id))])
+
+        # transpose list of lists
+        designed_seqs = list(map(list, zip(*designed_seqs)))
+        logit_seqs = list(map(list, zip(*logit_seqs)))
+        designed_res_list = list(map(list, zip(*designed_res_list)))
+        logit_res_list = list(map(list, zip(*logit_res_list)))
+        resid_chainid_list = list(map(list, zip(*resid_chainid_list)))
+
+        # write output to files
+        for i in range(batch.num_graphs):
+            sample_out_dir = os.path.join(self.args.out_dir, batch.pdb_id[i])
+            os.makedirs(sample_out_dir, exist_ok=True)
+            with open(os.path.join(sample_out_dir, 'full_sequences.csv'), 'w') as f:
+                writer = csv.writer(f)
+                writer.writerow(['sequence'])
+                writer.writerows([[''.join(seq)] for seq in designed_seqs[i]])
+            with open(os.path.join(sample_out_dir, 'designed_residues.csv'), 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(resid_chainid_list[i][0])
+                writer.writerows(designed_res_list[i])
+            np.save(os.path.join(sample_out_dir, 'designed_logits.npy'), np.stack(logit_res_list[i]))
+            np.save(os.path.join(sample_out_dir, 'full_sequence_logits.npy'), np.stack(logit_seqs[i]))
+        return designed_seqs, designed_res_list, logit_seqs, logit_res_list, resid_chainid_list
 
     def on_predict_epoch_end(self):
         log = self._log
         log = {key: log[key] for key in log if "inf_" in key}
         lg(str(self.get_log_mean(log)))
         time = datetime.now().strftime('%Y%m%d-%H%M%S-%f')
-        path = os.path.join(
-            os.environ["MODEL_DIR"], f"inf_{time}.csv"
-        )
+        path = os.path.join(os.environ["MODEL_DIR"], f"inf_{time}.csv")
         pd.DataFrame(log).to_csv(path)
+        lg("Finished and saved all predictions to: ", self.args.out_dir)
 
     def on_train_epoch_end(self):
         self.on_epoch_end("train")
@@ -482,7 +582,6 @@ class FlowSiteModule(GeneralModule):
             self.log_dict(self.get_log_mean(log), batch_size=1)
             if self.args.wandb:
                 wandb.log(self.get_log_mean(log), step=self.trainer.global_step)
-
             path = os.path.join(os.environ["MODEL_DIR"], f"{stage}_{self.trainer.current_epoch}.csv")
             log_clone = copy.deepcopy(log)
             for key in list(log_clone.keys()):
