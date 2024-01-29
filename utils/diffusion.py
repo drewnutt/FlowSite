@@ -6,6 +6,7 @@ import torch.nn as nn
 from torch_scatter import scatter_mean
 
 from models.tfn_layers import GaussianSmearing
+from utils.featurize import generate_conformer
 
 
 class SinusoidalEmbedding(nn.Module):
@@ -95,8 +96,9 @@ def pyg_add_harmonic_noise(args, batch):
     batch['ligand'].pos = P @ pos
     batch.std = scatter_mean(std ** 2, bid) ** 0.5
 
-def sample_prior(batch, sigma, harmonic=True):
-    if harmonic:
+def sample_prior(batch, sigma, prior: str = 'harmonic'):
+    assert prior in ['harmonic','gaussian','ETKDG']
+    if prior == 'harmonic':
         bid = batch['ligand'].batch
         sde = DiffusionSDE(batch.protein_sigma * sigma)
 
@@ -113,9 +115,13 @@ def sample_prior(batch, sigma, harmonic=True):
         noise = torch.randn_like(batch["ligand"].pos)
         prior = P @ (noise / torch.sqrt(D)[:, None])
         return prior
-    else:
+    elif prior == 'diffusion':
         prior = torch.randn_like(batch["ligand"].pos)
         return prior * sigma
+    else: # has to be ETKDG
+        return batch['ligand'].etkdg_prior
+
+        
 
 class DiffusionSDE:
     def __init__(self, sigma: torch.Tensor, tau_factor=5.0):

@@ -6,7 +6,7 @@ def parse_train_args(args=sys.argv[1:]):
     parser = ArgumentParser()
     # Logging
     parser.add_argument('--warn_with_traceback', action='store_true', default=False, help='')
-    parser.add_argument('--run_name', type=str, default='default', help='')
+    parser.add_argument('--run_name', type=str, default='', help='')
     parser.add_argument('--wandb', action='store_true', default=False, help='Whether or not to use wandb for logging')
     parser.add_argument('--project', type=str, default='pocket_gen', help='The name of the wandb project')
     parser.add_argument('--debug', action='store_true', default=False)
@@ -76,7 +76,7 @@ def parse_train_args(args=sys.argv[1:]):
     parser.add_argument("--flow_matching_sigma", type=float, default=0.5)
     parser.add_argument("--velocity_prediction", action='store_true', default=False, help='')
     parser.add_argument("--prior_scale", type=float, default=1)
-    parser.add_argument('--gaussian_prior', action='store_true', default=False, help='')
+    parser.add_argument('--prior', default='harmonic', choices=['harmonic','gaussian','ETKDG'], help='')
     parser.add_argument('--self_condition_inv', action='store_true', default=False, help='')
     parser.add_argument('--self_condition_x', action='store_true', default=False, help='Whether or not to use structure self conditioning')
     parser.add_argument('--self_condition_inv_logits', action='store_true', default=False, help='')
