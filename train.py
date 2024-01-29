@@ -31,7 +31,7 @@ def main_function():
         warnings.showwarning = warn_with_traceback
 
     if args.wandb:
-        wandb_logger = WandbLogger(entity='entity',
+        wandb_logger = WandbLogger(entity='andmcnutt',
             settings=wandb.Settings(start_method="fork"),
             project=args.project,
             name=args.run_name,
@@ -69,7 +69,7 @@ def main_function():
                         limit_val_batches=args.limit_val_batches or 1.0,
                         check_val_every_n_epoch=args.check_val_every_n_epoch,
                         gradient_clip_val=args.gradient_clip_val,
-                        callbacks=[ModelCheckpoint(monitor=('val_accuracy' if not args.all_res_early_stop else 'val_all_res_accuracy') if args.residue_loss_weight > 0 else 'val_rmsd<2', mode='max', filename='best', save_top_k=1, save_last=True, auto_insert_metric_name=True, verbose=True)]
+                        callbacks=[ModelCheckpoint(monitor=('val/accuracy' if not args.all_res_early_stop else 'val/all_res_accuracy') if args.residue_loss_weight > 0 else 'val/rmsd<2', mode='max', filename='best', save_top_k=1, save_last=True, auto_insert_metric_name=True, verbose=True)]
                       )
 
     numel = sum([p.numel() for p in model_module.model.parameters()])
