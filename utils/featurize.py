@@ -415,18 +415,59 @@ def read_molecule(molecule_file, sanitize=False, calc_charges=False, remove_hs=F
 
     return mol
 
-def generate_conformer(mol):
-    ps = AllChem.ETKDGv2()
+def generate_conformer(mol, seed=-1):
+    ps = AllChem.ETKDGv3()
+    ps.useSmallRingTorsions = True
+    ps.randomSeed = seed
     failures, id = 0, -1
     while failures < 5 and id == -1:
         if failures > 0:
             print(f'rdkit coords could not be generated. trying again {failures}.')
+            ps.useRandomCoords = True
         id = AllChem.EmbedMolecule(mol, ps)
         failures += 1
-    if id == -1:
-        print('rdkit coords could not be generated without using random coords. using random coords now.')
-        ps.useRandomCoords = True
-        id = AllChem.EmbedMolecule(mol, ps)
-        AllChem.MMFFOptimizeMolecule(mol, confId=0)
-        return id
+    # if id == -1:
+    #     print('rdkit coords could not be generated without using random coords. using random coords now.')
+    #     ps.useRandomCoords = True
+    #     id = AllChem.EmbedMolecule(mol, ps)
+        # AllChem.MMFFOptimizeMolecule(mol, confId=0) # not sure why they were MMFF Optimizing, this is expensive
+        # return id
     return id
+
+def build_molecule(atom_types, atom_charges, bond_types, bond_src_idxs, bond_dst_idxs, addHs=False, smile=None):
+    mol = Chem.RWMol()
+    assert len(atom_types) == len(atom_charges)
+    for atom_type, charge in zip(atom_types, atom_charges):
+        c = atom_features_list['formal_charge'][charge.item()]
+        a = Chem.Atom(atom_type.item() + 1)
+        if c != 0:
+            a.SetFormalCharge(int(c))
+        mol.AddAtom(a)
+
+    # add bonds to rdkit molecule
+    assert len(bond_types) == len(bond_src_idxs) == len(bond_dst_idxs)
+    bond_type_map = [Chem.rdchem.BondType.SINGLE, Chem.rdchem.BondType.DOUBLE, Chem.rdchem.BondType.TRIPLE,
+                                  Chem.rdchem.BondType.AROMATIC, None]
+    for bond_type, src_idx, dst_idx in zip(bond_types, bond_src_idxs, bond_dst_idxs):
+        src_idx = int(src_idx.item())
+        dst_idx = int(dst_idx.item())
+        mol.AddBond(src_idx, dst_idx, bond_type_map[bond_type.item()])
+
+    try:
+        mol = mol.GetMol()
+    except Chem.KekulizeException:
+        return None
+
+    try:
+        Chem.SanitizeMol(mol)
+    except Exception as e:
+        if smile is not None:
+            mol = AllChem.AssignBondOrdersFromTemplate(Chem.MolFromSmiles(smile),mol)
+            Chem.SanitizeMol(mol)
+        else:
+            raise e
+
+    if addHs:
+        mol = Chem.AddHs(mol)
+
+    return mol
