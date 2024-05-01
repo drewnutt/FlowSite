@@ -183,6 +183,10 @@ class FlowSiteModule(GeneralModule):
             loss += angle_loss * self.args.angle_loss_weight
         else:
             angle_loss = torch.tensor(0.0)
+        if self.args.quad_bond_loss:
+            quad_bond_loss = self.bond_loss(pos_list[-1], batch)
+        else:
+            quad_bond_loss = torch.tensor(0.0)
 
         if self.args.confidence_loss_weight > 0:
             with torch.no_grad():
@@ -248,6 +252,8 @@ class FlowSiteModule(GeneralModule):
                 self.lg('lowT_all_res_blosum_score', all_res_blosum_score[lowT].cpu().numpy())
                 self.lg('lowT_cooccur_score', cooccur_score[lowT].cpu().numpy())
                 self.lg('lowT_all_res_cooccur_score', all_res_cooccur_score[lowT].cpu().numpy())
+            if self.args.quad_bond_loss:
+                self.lg('bond_loss', [quad_bond_loss.cpu().numpy()]*len(batch.pdb_id))
             if self.args.confidence_loss_weight > 0:
                 self.lg('confidence_loss', weight_confidence.cpu().numpy())
 
@@ -293,7 +299,7 @@ class FlowSiteModule(GeneralModule):
             for k, v in batch.logs.items():
                 self.lg(k, np.array([v]))
             batch.logs = {}
-        return loss.mean()
+        return loss.mean() + quad_bond_loss
 
     def log_3D_metrics(self, rmsd, centroid_rmsd, kabsch_rmsd, suffix=""):
         self.lg(f"rmsd{suffix}", rmsd)
@@ -474,6 +480,15 @@ class FlowSiteModule(GeneralModule):
         cooccur_score = get_cooccur_score(torch.argmax(pocket_res_pred, dim=1), pocket_res_true,prot_bid[to_predict_mask])
 
         return discrete_loss, designable_loss, all_res_loss, accuracy, all_res_accuracy, allmean_accuracy, allmean_all_res_accuracy, blosum_score, all_res_blosum_score, cooccur_score, all_res_cooccur_score, unnorm_blosum_score, all_res_unnorm_blosum_score
+
+    def bond_loss(self, model_out, batch):
+        edges = batch['ligand','bond_edge','ligand'].edge_index
+        edges = edges[:, edges[0] < edges[1]] #de-duplicate
+        etkdg_dist = torch.norm(batch['ligand'].etkdg_prior[edges[0]] - batch['ligand'].etkdg_prior[edges[1]], dim =1)
+
+        curr_dist = torch.norm(model_out[edges[0]] - model_out[edges[1]], dim =1)
+        quadratic = torch.nn.functional.mse_loss(curr_dist,etkdg_dist, reduction='none')
+        return torch.clamp(quadratic, max=self.args.quad_bond_loss_max).mean()
 
     def get_log_mean(self, log):
         out = {}

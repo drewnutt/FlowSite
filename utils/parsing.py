@@ -61,6 +61,8 @@ def parse_train_args(args=sys.argv[1:]):
     parser.add_argument('--pos_loss_weight', type=float, default=0.01, help='weight for the coordinate loss compared to the residue decoding loss')
     parser.add_argument("--aux_weight", type=float, default=0.5)
     parser.add_argument("--residue_loss_weight", type=float, default=0.0)
+    parser.add_argument("--quad_bond_loss", action='store_true', default=False, help='Use the prior\'s bond lengths as truth and make a quadratic loss based on that')
+    parser.add_argument("--quad_bond_loss_max", type=float, default=1.0, help='Max value for quadratic bond length loss')
     parser.add_argument("--confidence_loss_weight", type=float, default=0.0, help='Weight for the confidence loss')
     parser.add_argument('--num_pos_only_epochs', type=int, default=0, help='number of epochs in which the residue identity loss is set to 0')
     parser.add_argument('--num_all_res_train_epochs', type=int, default=1000000, help='for how many epochs to pretrain on the losses of all residues')

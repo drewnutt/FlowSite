@@ -19,7 +19,7 @@ from torch_geometric.data import Dataset, HeteroData
 from tqdm import tqdm
 
 from utils.featurize import read_molecule, featurize_prody, init_lig_graph, atom_features_list, bond_features_list, \
-    get_protein_subgraph
+    get_protein_subgraph, generate_conformer, build_molecule
 from utils.logging import lg
 from utils.mmcif import RESTYPES
 from utils.residue_constants import amino_acid_atom_names, af2_latest_excluded_ligs
@@ -209,6 +209,32 @@ class ComplexDataset(Dataset):
         # get designable mask on designable residues
         data['protein'].designable_mask = torch.zeros_like(data['protein'].min_lig_dist).bool()
         data['protein'].designable_mask[data['protein'].min_lig_dist < self.args.design_residue_cutoff] = True
+
+        #compute the ETKDG conformation of the ligand for prior
+        if self.args.quad_bond_loss:
+            num_bonds = data['ligand', 'bond_edge','ligand'].edge_attr.size()[0]//2
+            try:
+                lig_mol = build_molecule(data['ligand'].feat[:,0],
+                                         data['ligand'].feat[:,5],
+                                         data['ligand'].feat[:,6],
+                                         data['ligand', 'bond_edge','ligand'].edge_attr[:num_bonds,0],
+                                         data['ligand', 'bond_edge','ligand'].edge_index[0,::2],
+                                         data['ligand', 'bond_edge','ligand'].edge_index[1,::2],
+                                         addHs=True)
+            except Exception as e:
+                print(data['ligand'].name)
+                raise e
+            gen_conf = generate_conformer(lig_mol, optimizeMol=self.args.optimize_ETKDG)
+            if gen_conf == -1:
+                raise Exception(f'Could not generate conformer for {data["ligand"].name}')
+            lig_mol = Chem.RemoveAllHs(lig_mol)
+            etkdg_pos = torch.from_numpy(lig_mol.GetConformer(gen_conf).GetPositions()).float().to(data['ligand'].pos)
+            # center the ligand around the origin
+            etkdg_pos -= torch.mean(etkdg_pos,dim=0)
+            # now add noise
+            etkdg_pos += torch.rand(3) * self.args.etkdg_noise
+            data['ligand'].etkdg_prior = etkdg_pos
+            assert data['ligand'].etkdg_prior.size() == data['ligand'].pos.size(), f"{data['ligand'].name}:{etkdg_pos.size()},{data['ligand'].pos.size()}"
 
         try:
             data = self.get_pocket(data)
