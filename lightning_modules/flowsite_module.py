@@ -187,6 +187,10 @@ class FlowSiteModule(GeneralModule):
             quad_bond_loss = self.bond_loss(pos_list[-1], batch)
         else:
             quad_bond_loss = torch.tensor(0.0)
+        if self.args.quad_angle_loss:
+            quad_angle_loss = self.angle_loss(pos_list[-1], batch)
+        else:
+            quad_angle_loss = torch.tensor(0.0)
 
         if self.args.confidence_loss_weight > 0:
             with torch.no_grad():
@@ -254,6 +258,8 @@ class FlowSiteModule(GeneralModule):
                 self.lg('lowT_all_res_cooccur_score', all_res_cooccur_score[lowT].cpu().numpy())
             if self.args.quad_bond_loss:
                 self.lg('bond_loss', [quad_bond_loss.cpu().numpy()]*len(batch.pdb_id))
+            if self.args.quad_angle_loss:
+                self.lg('angle_loss', [quad_angle_loss.cpu().numpy()]*len(batch.pdb_id))
             if self.args.confidence_loss_weight > 0:
                 self.lg('confidence_loss', weight_confidence.cpu().numpy())
 
@@ -299,7 +305,7 @@ class FlowSiteModule(GeneralModule):
             for k, v in batch.logs.items():
                 self.lg(k, np.array([v]))
             batch.logs = {}
-        return loss.mean() + quad_bond_loss
+        return loss.mean() + quad_bond_loss + quad_angle_loss
 
     def log_3D_metrics(self, rmsd, centroid_rmsd, kabsch_rmsd, suffix=""):
         self.lg(f"rmsd{suffix}", rmsd)
@@ -489,6 +495,27 @@ class FlowSiteModule(GeneralModule):
         curr_dist = torch.norm(model_out[edges[0]] - model_out[edges[1]], dim =1)
         quadratic = torch.nn.functional.mse_loss(curr_dist,etkdg_dist, reduction='none')
         return torch.clamp(quadratic, max=self.args.quad_bond_loss_max).mean()
+
+    def angle_loss(self, model_out, batch):
+        # find the bond angles in the ligand by finding the edges that share a node
+        edges = batch['ligand','bond_edge','ligand'].edge_index
+        edges = edges[:, edges[0] < edges[1]] #de-duplicate
+        # calculate the bond vectors
+        etkdg_bond_vecs = batch['ligand'].etkdg_prior[edges[0]] - batch['ligand'].etkdg_prior[edges[1]]
+        etkdg_unit_vecs = etkdg_bond_vecs / torch.norm(etkdg_bond_vecs, dim=1)[:, None]
+        etkdg_dot_prods = torch.sum(etkdg_unit_vecs[0] * etkdg_unit_vecs[1], dim=1)
+        etkdg_angles = torch.acos(etkdg_dot_prods).detach()
+
+        # now the same for the model output
+        curr_bond_vecs = model_out[edges[0]] - model_out[edges[1]]
+        curr_unit_vecs = curr_bond_vecs / torch.norm(curr_bond_vecs, dim=1)[:, None]
+        curr_dot_prods = torch.sum(curr_unit_vecs[0] * curr_unit_vecs[1], dim=1)
+        curr_angles = torch.acos(curr_dot_prods)
+
+        diff = torch.abs(etkdg_angles - curr_angles)
+        diff = torch.minimum(diff, 2 * np.pi - diff)
+        return (torch.clamp(diff ** 2, max=self.args.quad_angle_loss_max)).mean()
+
 
     def get_log_mean(self, log):
         out = {}
