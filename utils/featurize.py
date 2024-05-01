@@ -17,7 +17,6 @@ from utils.logging import lg
 from utils.mmcif import RESTYPES, CHI_ANGLES_MASK, ALLOWED_NONSTD_RESIDUES
 
 
-
 biopython_parser = PDBParser()
 bond_features_list = {
     'bond_type' : ['SINGLE', 'DOUBLE', 'TRIPLE', 'AROMATIC', 'misc'],
@@ -342,6 +341,11 @@ def init_lig_graph(args,lig, data):
     data['ligand', 'bond_edge', 'ligand'].edge_index = bond_idx
     data['ligand', 'bond_edge', 'ligand'].edge_attr = bond_attr
 
+    data['ligand'].isomorphisms = isomorphic_core(lig)
+
+def isomorphic_core(mol):
+    # finds the permutations of the atom indices that are equivalent
+    return [list(res) for res in mol.GetSubstructMatches(mol, uniquify=False)]
 
 def get_ligand_distance_edges(args, complex_graph):
     distance_idx = radius_graph(complex_graph['ligand'].pos, r=args.lig_radius, max_num_neighbors=1000)
@@ -415,18 +419,23 @@ def read_molecule(molecule_file, sanitize=False, calc_charges=False, remove_hs=F
 
     return mol
 
-def generate_conformer(mol):
-    ps = AllChem.ETKDGv2()
-    failures, id = 0, -1
-    while failures < 5 and id == -1:
+def generate_conformer(mol, seed=-1, optimizeMol=False):
+    ps = AllChem.ETKDGv3()
+    ps.useSmallRingTorsions = True
+    ps.randomSeed = seed
+    failures, confid = 0, -1
+    while failures < 5 and confid == -1:
         if failures > 0:
             print(f'rdkit coords could not be generated. trying again {failures}.')
-        id = AllChem.EmbedMolecule(mol, ps)
+            ps.useRandomCoords = True
+        confid = AllChem.EmbedMolecule(mol, ps)
         failures += 1
-    if id == -1:
-        print('rdkit coords could not be generated without using random coords. using random coords now.')
-        ps.useRandomCoords = True
-        id = AllChem.EmbedMolecule(mol, ps)
-        AllChem.MMFFOptimizeMolecule(mol, confId=0)
-        return id
-    return id
+    # if id == -1:
+    #     print('rdkit coords could not be generated without using random coords. using random coords now.')
+    #     ps.useRandomCoords = True
+    #     id = AllChem.EmbedMolecule(mol, ps)
+    if confid != -1 and optimizeMol:
+        AllChem.UFFOptimizeMolecule(mol, confId=confid) # not sure why they were MMFF Optimizing, this is expensive
+        # return id
+    return confid
+
