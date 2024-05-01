@@ -6,9 +6,11 @@ from e3nn import o3
 import torch
 from torch import nn
 from torch.nn import functional as F
-from torch_scatter import scatter
+from torch.nn.utils.rnn import pad_sequence
+from torch_scatter import scatter, scatter_mean
 import numpy as np
 from e3nn.nn import BatchNorm
+from einops import rearrange
 from models.pytorch_modules import LayerNorm, Linear, Encoder
 
 ACTIVATIONS = {
@@ -22,8 +24,59 @@ class ConvGraph():
         self.attr = attr
         self.sh = sh
 
+class SequenceBatchLayer(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
 
+    def forward(self, input, batchids):
+        _, batch_lengths = torch.unique_consecutive(batchids, return_counts=True)
+        batches = torch.split(input, list(batch_lengths), dim=0)
+        max_length = max(batch_lengths)
+        return pad_sequence(batches, batch_first=True, padding_value=0)
 
+class Attention(nn.Module):
+    def __init__(self, embed_dim, num_heads, dropout=0.0, **kwargs):
+        super().__init__()
+        self.heads = num_heads
+        self.to_qkv = nn.Linear(embed_dim, embed_dim * 3)
+        self.multihead_attn = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout, **kwargs)
+
+    def forward(self, x):
+        q, k, v = self.to_qkv(x).chunk(3, dim=-1)
+        return self.multihead_attn(q, k , v)[0]
+
+class ReadoutTFNLayer(torch.nn.Module):
+    def __init__(self, args):
+        super().__init__()
+        self.args = args
+        self.input_size = args.ns
+
+        if self.args.score_module == 'linear':
+            self.hidden_layers = nn.ModuleList([Linear(self.input_size, self.input_size) for _ in range(args.score_hidden_layers)])
+        elif self.args.score_module == 'transformer':
+            self.sequencer = SequenceBatchLayer()
+            self.cls_token = nn.Parameter(torch.randn(1, 1, self.input_size))
+            self.hidden_layers = nn.ModuleList()
+            for _ in range(args.score_hidden_layers):
+                self.hidden_layers.append(nn.Sequential(Attention(embed_dim=self.input_size, num_heads=8, batch_first=True), nn.Linear(self.input_size, self.input_size)))
+        else:
+            raise ValueError(f"Unknown score_module: {self.args.score_module}")
+
+        self.readout = Linear(self.input_size, 1 if self.args.score_output == "RMSD" else 2)
+
+    def forward(self, lig_na, batch):
+        scalar_lig_attr = lig_na[:, :self.args.ns]
+        if self.args.score_module == 'linear':
+            lig_vals = scatter_mean(scalar_lig_attr, batch['ligand'].batch, dim=0)
+        elif self.args.score_module == 'transformer':
+            lig_vals = self.sequencer(scalar_lig_attr, batch['ligand'].batch)
+            print(lig_vals.shape)
+            lig_vals = torch.cat([self.cls_token.repeat(lig_vals.shape[0], 1, 1), lig_vals], 1)
+        for layer in self.hidden_layers:
+            lig_vals = F.relu(layer(lig_vals))
+        if self.args.score_module == 'transformer':
+            lig_vals = lig_vals[:, 0] if self.args.score_pool == 'cls' else lig_vals.mean(1)
+        return self.readout(lig_vals)
 
 
 class RefinementTFNLayer(torch.nn.Module):

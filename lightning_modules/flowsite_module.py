@@ -148,8 +148,7 @@ class FlowSiteModule(GeneralModule):
             if (self.args.self_condition_inv or self.args.self_condition_x) and np.random.rand() < self.args.self_condition_ratio:
 
                 with torch.no_grad():
-                    res_pred, pos_list, angles = self.model(copy.deepcopy(batch), x_self=sample_prior(batch, self.args.prior_scale , harmonic=not self.args.gaussian_prior) if self.args.self_condition_x else None, x_prior=x0 if self.args.prior_condition else None) 
-
+                    res_pred, pos_list, angles = self.model(copy.deepcopy(batch), x_self=sample_prior(batch, self.args.prior_scale , harmonic=not self.args.gaussian_prior) if self.args.self_condition_x else None, x_prior=x0 if self.args.prior_condition else None)
                 res_pred, pos_list, angles = self.model(batch, x_self =copy.deepcopy(pos_list[-1].detach()) if self.args.self_condition_x else None, x_prior=x0 if self.args.prior_condition else None)
             else:
                 res_pred, pos_list, angles = self.model(copy.deepcopy(batch), x_self=sample_prior(batch, self.args.prior_scale , harmonic=not self.args.gaussian_prior) if self.args.self_condition_x else None, x_prior=x0 if self.args.prior_condition else None)
@@ -185,11 +184,37 @@ class FlowSiteModule(GeneralModule):
         else:
             angle_loss = torch.tensor(0.0)
 
+        if self.args.confidence_loss_weight > 0:
+            with torch.no_grad():
+                if new_idx_iso is None:
+                    new_idx_iso = self.update_iso(training_target, pos_list[-1], batch)
+                    training_target = training_target.index_select(0, new_idx_iso)
+                # get the RMSD of the each ligand in the batch
+                square_devs = torch.square(training_target - pos_list[-1])
+                rmsd = scatter_mean(square_devs.sum(-1), bid, -1).sqrt().detach()
+                # check if the RMSD is less than 2 Angstroms
+                low_rmsd = (rmsd <= 2).long().detach()
+                # # get the confidence score for each ligand in the batch
+            # conf_score = torch.nn.functional.softmax(conf_score, dim=1)
+            # using the the low_rmsd as the label, calculate the cross entropy loss
+            if self.args.score_output == "RMSD":
+                confidence_loss = torch.nn.functional.mse_loss(conf_score, torch.unsqueeze(rmsd,1), reduction='none')
+            elif self.args.score_output == "Conf":
+                confidence_loss = torch.nn.functional.cross_entropy(conf_score, low_rmsd, reduction='none')
+
+            # add the confidence loss to the total loss
+            weight_confidence = (confidence_loss.squeeze() * batch.t01)
+            if self.args.clamp_loss:
+                confidence_loss = torch.clamp(weight_confidence, max=self.args.clamp_loss)
+            loss += weight_confidence * self.args.confidence_loss_weight
+        else:
+            weight_confidence = torch.tensor(0.0)
+
+
         with torch.no_grad():
             self.lg("num_res", (batch.protein_size.cpu().numpy()))
             self.lg("batch_idx", [batch_idx]*len(batch.pdb_id))
             self.lg("num_ligs", (batch.num_ligs.cpu().numpy()))
-            # self.lg("num_designable", ((scatter_add(batch['protein'].designable_mask.int(), batch['protein'].batch)).cpu().numpy()))
             self.lg("lig_size", (batch['ligand'].size).cpu().numpy())
             self.lg("name", batch.pdb_id)
             self.lg("rec_sigma", batch.protein_sigma.cpu().numpy())
@@ -198,7 +223,6 @@ class FlowSiteModule(GeneralModule):
             self.lg("sigma", batch.std.cpu().numpy())
             self.lg("aux_loss", aux_loss.cpu().numpy())
             self.lg("pos_loss", pos_loss.cpu().numpy())
-            # self.lg("angle_loss", [angle_loss.cpu().numpy()])
             self.lg("loss", loss.cpu().numpy())
             lowT = torch.where(batch.normalized_t <= 2 / 20)[0]
             self.lg('lowT_pos_loss', pos_loss[lowT].cpu().numpy())
@@ -224,17 +248,19 @@ class FlowSiteModule(GeneralModule):
                 self.lg('lowT_all_res_blosum_score', all_res_blosum_score[lowT].cpu().numpy())
                 self.lg('lowT_cooccur_score', cooccur_score[lowT].cpu().numpy())
                 self.lg('lowT_all_res_cooccur_score', all_res_cooccur_score[lowT].cpu().numpy())
+            if self.args.confidence_loss_weight > 0:
+                self.lg('confidence_loss', weight_confidence.cpu().numpy())
 
             if (self.stage == "val" and (self.trainer.current_epoch + 1) % self.args.check_val_every_n_epoch == 0) or self.stage == "pred":
                 if self.args.use_true_pos:
-                    res_pred, pos_list, angles = self.model(batch)
+                    res_pred, pos_list, angles, conf_score = self.model(batch)
                     x1 = pos_list[-1]
                     x1_out = pos_list[-1]
                 else:
                     if self.args.flow_matching:
-                        x1_out, x1, res_pred = self.flow_match_inference(batch, batch_idx)
+                        x1_out, x1, res_pred, conf_score = self.flow_match_inference(batch, batch_idx)
                     else:
-                        x1_out, x1, res_pred = self.harmonic_inference(batch, batch_idx)
+                        x1_out, x1, res_pred, conf_score = self.harmonic_inference(batch, batch_idx)
 
                 angle_loss = supervised_chi_loss(batch, angles, angles_idx_s=11 - self.args.num_angle_pred) if self.args.num_angle_pred > 0 else torch.tensor(0.0)
                 recovered_aa_angle_loss = get_recovered_aa_angle_loss(copy.deepcopy(batch), angles, res_pred, angles_idx_s=11-self.args.num_angle_pred) if self.args.num_angle_pred > 0 else torch.tensor(0.0)
@@ -290,7 +316,7 @@ class FlowSiteModule(GeneralModule):
     def flow_match_inference(self, batch, batch_idx=None, production_mode = False):
         # be careful, the meaning of x0 and x1 is reversed here in flow matching compared to diffusion
 
-        x0 = sample_prior(batch, self.args.prior_scale, harmonic=not self.args.gaussian_prior)
+        x0 = sample_prior(batch, self.args.prior_scale , harmonic=not self.args.gaussian_prior)
         if self.args.self_condition_inv:
             batch['protein'].input_feat = batch['protein'].feat * 0 + len(atom_features_list['residues_canonical'])
         x_self = sample_prior(batch, self.args.prior_scale , harmonic=not self.args.gaussian_prior) if self.args.self_condition_x else None
@@ -308,8 +334,7 @@ class FlowSiteModule(GeneralModule):
         while steps <= len(t_span) - 1:
             batch["ligand"].pos = xt
             batch.t01 = t.expand(len(batch.pdb_id)).to(x0)
-            res_pred, pos_list, angles = self.model(batch, x_self=x_self, x_prior=x0 if self.args.prior_condition else None)
-            x1_pred = pos_list[-1]
+            res_pred, pos_list, angles, conf_score = self.model(batch, x_self=x_self, x_prior=x0 if self.args.prior_condition else None)
             x1_pred = pos_list[-1]
             vt = x1_pred - x0 if not self.args.velocity_prediction else x1_pred
             if self.args.corr_integration:
@@ -335,7 +360,7 @@ class FlowSiteModule(GeneralModule):
         if self.args.save_inference and (batch_idx == 0 or self.args.save_all_batches) and self.inference_counter % self.args.inference_save_freq == 0 or self.stage == "pred" and self.args.save_inference and self.args.save_all_batches:
             self.inference_counter = 0
             save_trajectory_pdb(self.args, batch, sol, model_pred, extra_string=f'{self.stage}_{self.trainer.global_step}globalStep', production_mode=production_mode, out_dir=os.path.join(self.args.out_dir, 'structures') if production_mode else None)
-        return x1_pred, xt, res_pred
+        return x1_pred, xt, res_pred, conf_score
 
     @torch.no_grad()
     def harmonic_inference(self, batch, batch_idx=None):
@@ -345,7 +370,6 @@ class FlowSiteModule(GeneralModule):
         times01 = torch.linspace(1, 0, self.args.num_integration_steps + 1, device=device)[:, None]
         ts = times01 ** 2 * sde.max_t()
         bid = batch["ligand"].batch
-
         noise = torch.randn_like(batch["ligand"].pos)
         xt = batch.P @ (noise / torch.sqrt(batch.D)[:,None])
         if self.args.self_condition_inv:
@@ -361,7 +385,7 @@ class FlowSiteModule(GeneralModule):
                 batch.t01 = copy.deepcopy(t01).to(device).expand(len(batch.pdb_id))
                 batch.normalized_t = s.expand(len(batch.pdb_id))
             try:
-                res_pred, pos_list, angles = self.model(batch)
+                res_pred, pos_list, angles, conf_score = self.model(batch)
             except Exception as e:
                 lg("Error in inference")
                 lg(batch.pdb_id)
@@ -391,7 +415,41 @@ class FlowSiteModule(GeneralModule):
         if self.args.save_inference and (batch_idx == 0 or self.args.save_all_batches) and self.inference_counter % self.args.inference_save_freq == 0 or self.stage == "pred" and self.args.save_inference and self.args.save_all_batches:
             self.inference_counter = 0
             save_trajectory_pdb(self.args, batch, sol, model_pred, extra_string=f'{self.stage}_{self.trainer.global_step}globalStep')
-        return x0, xt, res_pred
+        return x0, xt, res_pred, conf_score
+
+    @torch.no_grad()
+    def update_iso(self, pos_y, pos_x, batch):
+        with torch.no_grad():
+            pre_nodes = 0
+            num_nodes = batch['ligand'].size
+            isomorphisms = batch['ligand'].isomorphisms
+            new_idx_x = []
+            for i in range(len(batch)):
+                cur_num_nodes = num_nodes[i]
+                current_isomorphisms = [
+                    torch.LongTensor(iso).to(pos_x.device) for iso in isomorphisms[i]
+                ]
+                if len(current_isomorphisms) == 1:
+                    new_idx_x.append(current_isomorphisms[0] + pre_nodes)
+                else:
+                    pos_y_i = pos_y[pre_nodes : pre_nodes + cur_num_nodes]
+                    pos_x_i = pos_x[pre_nodes : pre_nodes + cur_num_nodes]
+                    pos_x_list = []
+
+                    for iso in current_isomorphisms:
+                        pos_x_list.append(torch.index_select(pos_x_i, 0, iso))
+                    total_iso = len(pos_x_list)
+                    pos_y_i = pos_y_i.repeat(total_iso, 1)
+                    pos_x_i = torch.cat(pos_x_list, dim=0)
+                    dist = torch.square(
+                        pos_y_i-pos_x_i
+                    )
+                    # group by isomorphism
+                    dist = dist.view(total_iso, cur_num_nodes, -1).sum(dim=(1,2))
+                    min_idx = dist.argmin(dim=0)
+                    new_idx_x.append(current_isomorphisms[min_idx.item()] + pre_nodes)
+                pre_nodes += cur_num_nodes
+        return torch.cat(new_idx_x, dim=0)
 
     def get_discrete_metrics(self, batch, res_pred):
         prot_bid = batch["protein"].batch

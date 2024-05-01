@@ -15,7 +15,7 @@ from torch_scatter import scatter_mean
 
 from models.invariant_layers import InvariantLayer
 from models.pytorch_modules import Linear, Encoder
-from models.tfn_layers import RefinementTFNLayer, build_cg, GaussianSmearing
+from models.tfn_layers import RefinementTFNLayer, build_cg, GaussianSmearing, ReadoutTFNLayer
 from utils.diffusion import get_time_mapping
 
 from utils.featurize import get_feature_dims, atom_features_list
@@ -53,7 +53,6 @@ class FlowSiteModel(nn.Module):
             if self.args.lig2d_batch_norm: self.mpnn_batch_norms = ModuleList([BatchNorm(args.fold_dim) for i in range(args.lig_mpnn_layers)])
             self.mpnn_convs = ModuleList([PNAConv(in_channels=args.fold_dim , out_channels=args.fold_dim , aggregators=['mean', 'min', 'max', 'sum'], scalers=['identity'], deg=torch.tensor([0, 225, 21, 135, 65]), edge_dim=args.fold_dim) for i in range(args.lig_mpnn_layers)])
 
-
         self.decoder = nn.Linear(fold_dim, len(atom_features_list['residues_canonical']))
 
         if self.args.use_tfn:
@@ -61,14 +60,19 @@ class FlowSiteModel(nn.Module):
             if not args.drop_tfn_feat:
                 self.lig_tfn2inv = nn.Sequential(Linear(args.ns, args.ns), nn.ReLU(), Linear(args.ns, fold_dim))
                 self.rec_tfn2inv = nn.Sequential(Linear(args.ns, args.ns), nn.ReLU(), Linear(args.ns, fold_dim))
+            if self.args.tfn_score:
+                self.score_module = ReadoutTFNLayer(args)
+                assert self.args.tfn_score and self.args.confidence_loss_weight > 0, "If you want to use tfn_score, you must also use confidence_loss_weight > 0"
         assert not ((args.time_condition_inv or args.time_condition_tfn) and args.ignore_lig), "It does not make sense to use time conditioning without the ligand and therefore without diffusion."
 
-    def forward(self, data, x_self=None, x_prior= None):
+    def forward(self, data, x_self=None, x_prior=None):
         if self.args.use_tfn:
             lig_na_tfn, rec_na_tfn, lig_pos_stack = self.tfn(data, x_self, x_prior)
             if self.args.tfn_detach:
                 lig_na_tfn, rec_na_tfn = lig_na_tfn.detach(), rec_na_tfn.detach()
             data['ligand'].pos = lig_pos_stack[-1].detach()
+            if self.args.tfn_score:
+                pose_score = self.score_module(lig_na_tfn, data)
 
         if self.args.use_inv: # not used during docking
             if self.args.ignore_lig:
@@ -129,7 +133,7 @@ class FlowSiteModel(nn.Module):
         else:
             angles = None
 
-        return logits, lig_pos_stack if self.args.use_tfn else torch.stack([data['ligand'].pos]), angles
+        return logits, lig_pos_stack if self.args.use_tfn else torch.stack([data['ligand'].pos]), angles, pose_score if self.args.tfn_score else None
 
 class TensorFieldNet(nn.Module):
     def __init__(self, args):
@@ -158,6 +162,7 @@ class TensorFieldNet(nn.Module):
                 Encoder(emb_dim=args.ns, feature_dims=rec_feature_dims),
                 nn.ReLU(),
                 Linear(args.ns, args.ns, init="final" if args.fancy_init else "default"),
+            )
 
         self.lig_node_embedder = nn.Sequential(
             Encoder(emb_dim=args.ns, feature_dims=atom_feature_dims),
