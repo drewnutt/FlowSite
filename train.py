@@ -44,11 +44,11 @@ def main_function():
         train_data = torch.utils.data.ConcatDataset([train_data, train_data_combine])
     train_data.fake_lig_ratio = args.fake_ratio_start
     val_data = ComplexDataset(args, args.val_split_path, data_source=args.data_source, data_dir=args.data_dir)
-    train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
-    val_loader = DataLoader(val_data, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
+    train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True)
+    val_loader = DataLoader(val_data, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=True)
     if args.predict_split_path is not None:
         predict_data = ComplexDataset(args, args.predict_split_path, data_source=args.data_source, data_dir=args.data_dir)
-        predict_loader = DataLoader(predict_data, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
+        predict_loader = DataLoader(predict_data, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=True)
     else:
         predict_loader = None
     lg(f'Train data: {len(train_data)}')
