@@ -18,7 +18,6 @@ from datasets.complex_dataset import ComplexDataset
 from utils.parsing import parse_train_args
 
 def main_function():
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     args = parse_train_args()
     args.run_name_timed = args.run_name + '_' + datetime.fromtimestamp(datetime.now().timestamp()).strftime("%Y-%m-%d_%H-%M-%S")
     torch.set_float32_matmul_precision(precision=args.precision)
@@ -31,7 +30,7 @@ def main_function():
         warnings.showwarning = warn_with_traceback
 
     if args.wandb:
-        wandb_logger = WandbLogger(entity='entity',
+        wandb_logger = WandbLogger(entity='andmcnutt',
             settings=wandb.Settings(start_method="fork"),
             project=args.project,
             name=args.run_name,
@@ -39,25 +38,26 @@ def main_function():
     else:
         wandb_logger = None
 
-    train_data = ComplexDataset(args, args.train_split_path, data_source=args.data_source, data_dir=args.data_dir, multiplicity=args.train_multiplicity, device=device)
+    train_data = ComplexDataset(args, args.train_split_path, data_source=args.data_source, data_dir=args.data_dir, multiplicity=args.train_multiplicity)
     if args.train_split_path_combine is not None and args.data_source_combine is not None and args.data_dir_combine is not None:
-        train_data_combine = ComplexDataset(args, args.train_split_path_combine, data_source=args.data_source_combine, data_dir=args.data_dir_combine, multiplicity=args.train_multiplicity, device=device)
+        train_data_combine = ComplexDataset(args, args.train_split_path_combine, data_source=args.data_source_combine, data_dir=args.data_dir_combine, multiplicity=args.train_multiplicity)
         train_data = torch.utils.data.ConcatDataset([train_data, train_data_combine])
     train_data.fake_lig_ratio = args.fake_ratio_start
-    val_data = ComplexDataset(args, args.val_split_path, data_source=args.data_source, data_dir=args.data_dir, device=device)
+    val_data = ComplexDataset(args, args.val_split_path, data_source=args.data_source, data_dir=args.data_dir)
     train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
     val_loader = DataLoader(val_data, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
     if args.predict_split_path is not None:
-        predict_data = ComplexDataset(args, args.predict_split_path, data_source=args.data_source, data_dir=args.data_dir, device=device)
+        predict_data = ComplexDataset(args, args.predict_split_path, data_source=args.data_source, data_dir=args.data_dir)
         predict_loader = DataLoader(predict_data, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
     else:
         predict_loader = None
     lg(f'Train data: {len(train_data)}')
     lg(f'Val data: {len(val_data)}')
 
-    model = FlowSiteModel(args, device)
-    model_module = FlowSiteModule(args=args, device=device, model=model, train_data=train_data)
+    model = FlowSiteModel(args)
+    model_module = FlowSiteModule(args=args, model=model, train_data=train_data)
 
+    lg(f'Number of Devices:{args.num_devices}')
     trainer = Trainer(logger=wandb_logger,
                         default_root_dir=os.environ['MODEL_DIR'],
                         num_sanity_val_steps=0,
@@ -69,7 +69,10 @@ def main_function():
                         limit_val_batches=args.limit_val_batches or 1.0,
                         check_val_every_n_epoch=args.check_val_every_n_epoch,
                         gradient_clip_val=args.gradient_clip_val,
-                        callbacks=[ModelCheckpoint(monitor=('val_accuracy' if not args.all_res_early_stop else 'val_all_res_accuracy') if args.residue_loss_weight > 0 else 'val_rmsd<2', mode='max', filename='best', save_top_k=1, save_last=True, auto_insert_metric_name=True, verbose=True)]
+                        callbacks=[ModelCheckpoint(monitor=('val/accuracy' if not args.all_res_early_stop else 'val/all_res_accuracy') if args.residue_loss_weight > 0 else 'val/rmsd<2', mode='max', filename='best', save_top_k=1, save_last=True, auto_insert_metric_name=True, verbose=True)],
+                        accelerator="gpu",
+                        devices=args.num_devices,
+                        strategy='ddp_find_unused_parameters_true'
                       )
 
     numel = sum([p.numel() for p in model_module.model.parameters()])

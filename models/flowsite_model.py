@@ -24,13 +24,13 @@ from utils.simdesign_utils import gather_nodes, _dihedrals, _orientations_coarse
 
 
 class FlowSiteModel(nn.Module):
-    def __init__(self, args, device):
+    def __init__(self, args):
         super(FlowSiteModel, self).__init__()
         self.args = args
-        self.device = device
         fold_dim = args.fold_dim
         num_inv_layers = args.num_inv_layers
         atom_feature_dims, edge_feature_dims, lig_bond_feature_dims, rec_feature_dims = get_feature_dims()
+
 
         assert args.use_tfn or args.use_inv, "Must use at least one of tfn or inv, otherwise this model will do nothing"
         assert not (args.use_tfn and args.ignore_lig), "Tensorfield always uses lig so ignore_lig does not work with it"
@@ -47,62 +47,17 @@ class FlowSiteModel(nn.Module):
                 Linear(fold_dim, fold_dim, init="final" if args.fancy_init else "default"),
             )
         if not args.ignore_lig:
-            self.lig_edge_builder = LigEdgeBuilder(args, device)
-            self.cross_edge_builder = CrossEdgeBuilder(args, device)
+            self.lig_edge_builder = LigEdgeBuilder(args)
+            self.cross_edge_builder = CrossEdgeBuilder(args)
         if self.args.lig2d_mpnn:
             if self.args.lig2d_batch_norm: self.mpnn_batch_norms = ModuleList([BatchNorm(args.fold_dim) for i in range(args.lig_mpnn_layers)])
-            self.mpnn_convs = ModuleList([PNAConv(in_channels=args.fold_dim , out_channels=args.fold_dim , aggregators=['mean', 'min', 'max', 'sum'], scalers=['identity'], deg=torch.tensor([0, 225, 21, 135, 65]).to(device), edge_dim=args.fold_dim) for i in range(args.lig_mpnn_layers)])
+            self.mpnn_convs = ModuleList([PNAConv(in_channels=args.fold_dim , out_channels=args.fold_dim , aggregators=['mean', 'min', 'max', 'sum'], scalers=['identity'], deg=torch.tensor([0, 225, 21, 135, 65]), edge_dim=args.fold_dim) for i in range(args.lig_mpnn_layers)])
 
-        if self.args.use_inv:
-            if self.args.self_condition_inv:
-                if self.args.self_condition_bit:
-                    self.self_condition_bit_encoder = Encoder(emb_dim=args.fold_dim, feature_dims=[2])
-                rec_feature_dims[0] += 1 # now we have 22 different values. 20 for the amino acids, 1 for unknown, and one for a mask token.
-                self.inv_rec_node_embedder = nn.Sequential(
-                    Encoder(emb_dim=args.fold_dim, feature_dims=rec_feature_dims),
-                    nn.ReLU(),
-                    Linear(args.fold_dim, args.fold_dim, init="final" if args.self_fancy_init else "default"),
-                )
-                if self.args.self_condition_inv_logits:
-                    self.inv_self_logit_embedder = nn.Sequential(
-                        Linear(len(atom_features_list['residues_canonical']), args.fold_dim, init="final" if args.self_fancy_init else "default"),
-                        nn.ReLU(),
-                        Linear(args.fold_dim, args.fold_dim, init="final" if args.self_fancy_init else "default"),
-                    )
-                if self.args.standard_style_self_condition_inv:
-                    self.standard_self_condition_inv_embedder = nn.Sequential(
-                        Encoder(emb_dim=args.fold_dim, feature_dims=rec_feature_dims),
-                        nn.ReLU(),
-                        Linear(args.fold_dim, args.fold_dim, init="final" if args.self_fancy_init else "default"),
-                    )
-                    self.standard_self_condition_inv_combiner = nn.Sequential(
-                        Linear(args.fold_dim * 3, args.fold_dim),
-                        nn.ReLU(),
-                        Linear(args.fold_dim, args.fold_dim, init="final" if args.self_fancy_init else "default"),
-                    )
-
-            self.inv_embedder = PiFoldEmbedder(args, device)
-            self.inv_layers = nn.Sequential(*[InvariantLayer(args, device, update_edges=True if i + 1 < num_inv_layers else False) for i in range(num_inv_layers)])
-
-            if self.args.time_condition_inv:
-                time_mapping = get_time_mapping(args.time_emb_type, args.time_emb_dim)
-                self.time_encoder_inv = nn.Sequential(
-                    time_mapping,
-                    Linear(args.time_emb_dim, args.fold_dim),
-                    nn.ReLU(),
-                    Linear(args.fold_dim, args.fold_dim)
-                )
 
         self.decoder = nn.Linear(fold_dim, len(atom_features_list['residues_canonical']))
-        if self.args.num_angle_pred > 0:
-            self.angle_linear = Linear(fold_dim, fold_dim)
-            self.angle_linear_skip = Linear(fold_dim, fold_dim)
-            self.angle_decoder1 = nn.Sequential(Linear(fold_dim, fold_dim), nn.ReLU(), Linear(fold_dim, fold_dim), nn.ReLU())
-            self.angle_decoder2 = nn.Sequential(Linear(fold_dim, fold_dim), nn.ReLU(), Linear(fold_dim, fold_dim, nn.ReLU()))
-            self.angle_predictor = nn.Linear(fold_dim, self.args.num_angle_pred * 2)
 
         if self.args.use_tfn:
-            self.tfn = TensorFieldNet(args, device)
+            self.tfn = TensorFieldNet(args)
             if not args.drop_tfn_feat:
                 self.lig_tfn2inv = nn.Sequential(Linear(args.ns, args.ns), nn.ReLU(), Linear(args.ns, fold_dim))
                 self.rec_tfn2inv = nn.Sequential(Linear(args.ns, args.ns), nn.ReLU(), Linear(args.ns, fold_dim))
@@ -115,7 +70,7 @@ class FlowSiteModel(nn.Module):
                 lig_na_tfn, rec_na_tfn = lig_na_tfn.detach(), rec_na_tfn.detach()
             data['ligand'].pos = lig_pos_stack[-1].detach()
 
-        if self.args.use_inv:
+        if self.args.use_inv: # not used during docking
             if self.args.ignore_lig:
                 lig_na, lig_ea, lig_idx, cross_idx, cross_ea = None, None, None, None, None
             else:
@@ -166,7 +121,7 @@ class FlowSiteModel(nn.Module):
             rec_na = self.rec_tfn2inv(rec_na_tfn[:, :self.args.ns])
 
         logits = self.decoder(rec_na)
-        if self.args.num_angle_pred > 0:
+        if self.args.num_angle_pred > 0: # not used during docking
             angle_na = self.angle_linear(rec_na) + self.angle_linear_skip(rec_na)
             angle_na = angle_na + self.angle_decoder1(angle_na)
             angle_na = angle_na + self.angle_decoder2(angle_na)
@@ -177,11 +132,11 @@ class FlowSiteModel(nn.Module):
         return logits, lig_pos_stack if self.args.use_tfn else torch.stack([data['ligand'].pos]), angles
 
 class TensorFieldNet(nn.Module):
-    def __init__(self, args, device):
+    def __init__(self, args):
         super(TensorFieldNet, self).__init__()
         self.args = args
-        self.device = device
         atom_feature_dims, edge_feature_dims, lig_bond_feature_dims, rec_feature_dims = get_feature_dims()
+
 
         assert args.nv >= 3, "nv must be at least 3 to accommodate N, C, O vector features"
         self.feature_irreps = o3.Irreps([(args.ns if l == 0 else args.nv, (l, 1)) for l in range(args.order + 1)])
@@ -194,24 +149,15 @@ class TensorFieldNet(nn.Module):
                     Linear(args.ns, args.ns, init="final" if args.fancy_init else "default"),
                 )
         if self.args.tfn_pifold_feat:
-            self.inv_embedder = PiFoldEmbedder(args, device, dim=args.ns)
+            self.inv_embedder = PiFoldEmbedder(args, dim=args.ns)
         else:
             self.rec_node_init = nn.Parameter(torch.randn(args.ns))
 
         if self.args.self_condition_inv and self.args.residue_loss_weight > 0 or self.args.tfn_use_aa_identities:
-            if self.args.self_condition_inv and self.args.residue_loss_weight > 0 and not self.args.no_tfn_self_condition_inv:
-                rec_feature_dims[0] += 1  # now we have 22 different values. 20 for the amino acids, 1 for unknown, and one for a mask token.
             self.rec_node_embedder = nn.Sequential(
                 Encoder(emb_dim=args.ns, feature_dims=rec_feature_dims),
                 nn.ReLU(),
                 Linear(args.ns, args.ns, init="final" if args.fancy_init else "default"),
-            )
-            if self.args.self_condition_inv_logits:
-                self.inv_self_logit_embedder = nn.Sequential(
-                    Linear(len(atom_features_list['residues_canonical']), args.ns),
-                    nn.ReLU(),
-                    Linear(args.ns, args.ns, init="final" if args.self_fancy_init else "default"),
-                )
 
         self.lig_node_embedder = nn.Sequential(
             Encoder(emb_dim=args.ns, feature_dims=atom_feature_dims),
@@ -235,7 +181,7 @@ class TensorFieldNet(nn.Module):
 
         self.tfn_layers = nn.ModuleList([RefinementTFNLayer(args, last_layer=i == (args.num_tfn_layers - 1)) for i in range(args.num_tfn_layers)])
 
-    def forward(self, data, x_self=None, x_prior=None):
+    def forward(self,data, x_self=None, x_prior=None):
         lig_pos = data["ligand"].pos
         rec_cg = self.build_cg(
             pos=data["protein"].pos,
@@ -278,10 +224,9 @@ class TensorFieldNet(nn.Module):
         return lig_na, rec_na, torch.stack(lig_pos_list)
 
 class LigEdgeBuilder(nn.Module):
-    def __init__(self, args, device):
+    def __init__(self, args):
         super(LigEdgeBuilder, self).__init__()
         self.args = args
-        self.device = device
         self.lig_radius_embedder = nn.Sequential(
             GaussianSmearing(0.0, args.protein_radius, args.radius_emb_dim),
             Linear(
@@ -307,10 +252,9 @@ class LigEdgeBuilder(nn.Module):
         return edge_index, edge_attr
 
 class CrossEdgeBuilder(nn.Module):
-    def __init__(self, args, device):
+    def __init__(self, args):
         super(CrossEdgeBuilder, self).__init__()
         self.args = args
-        self.device = device
         self.cross_rbf = GaussianSmearing(0.0, args.protein_radius, args.radius_emb_dim)
         self.cross_attr_embedder = nn.Sequential(
             Linear(
@@ -383,10 +327,9 @@ def get_edge_attr(conv_graph, node_attr1, node_attr2=None, ns=None):
     return torch.cat([conv_graph.attr, node_attr1[src, :ns], node_attr2[dst, :ns]], -1)
 
 class PiFoldEmbedder(nn.Module):
-    def __init__(self, args, device, dim=None):
+    def __init__(self, args, dim=None):
         super(PiFoldEmbedder, self).__init__()
         self.args = args
-        self.device = device
         if dim is None:
             fold_dim = args.fold_dim
         else:
@@ -395,7 +338,7 @@ class PiFoldEmbedder(nn.Module):
         self.top_k = args.k_neighbors
         self.num_rbf = 16
 
-        self.virtual_atoms = nn.Parameter(torch.rand(self.args.virtual_num, 3, device=self.device))
+        self.virtual_atoms = nn.Parameter(torch.rand(self.args.virtual_num, 3))
 
         node_in = 0
         if self.args.node_dist:
@@ -437,6 +380,7 @@ class PiFoldEmbedder(nn.Module):
         self.W_e = nn.Linear(fold_dim, fold_dim, bias=True)
         self._init_params()
     def forward(self,data):
+        device = self.virtual_atoms.device
         start = time.time()
         unbatched_pos = unbatch(data['protein'].pos, data['protein'].batch)
         pos_N = data['protein'].pos_N
@@ -449,14 +393,14 @@ class PiFoldEmbedder(nn.Module):
         lengths = np.array([len(b) for b in unbatched_pos], dtype=np.int32)
         L_max = max(lengths)
         B = len(unbatched_pos)
-        X = torch.zeros([B, L_max, 4, 3], device=self.device)
+        X = torch.zeros([B, L_max, 4, 3], device=device)
         for i, (pos_Ca, pos_C, pos_N, pos_O) in enumerate(
                 zip(unbatched_pos, unbatched_pos_C, unbatched_pos_N, unbatched_pos_O)):
             x = torch.stack([pos_N, pos_Ca, pos_C, pos_O], 1)  # [#atom, 3, 3]
             l = len(pos_Ca)
             x_pad = torch.from_numpy(np.pad(x.detach().cpu().numpy(), [[0, L_max - l], [0, 0], [0, 0]], 'constant',
                                             constant_values=(np.nan,))).to(
-                self.device)  # [#atom, 4, 3]  # [#atom, 4, 3]
+                device)  # [#atom, 4, 3]  # [#atom, 4, 3]
             X[i, :, :, :] = x_pad
 
         mask = torch.isfinite(torch.sum(X, (2, 3))).float()  # atom mask

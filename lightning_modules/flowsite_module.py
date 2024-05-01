@@ -29,8 +29,8 @@ def gather_log(log, world_size):
     return log
 
 class FlowSiteModule(GeneralModule):
-    def __init__(self, args, device, model, train_data=None):
-        super().__init__(args, device, model)
+    def __init__(self, args, model, train_data=None):
+        super().__init__(args, model)
         os.makedirs(os.environ["MODEL_DIR"], exist_ok=True)
         self.args = args
         self.train_data = train_data
@@ -84,17 +84,17 @@ class FlowSiteModule(GeneralModule):
             log = gather_log(log, self.trainer.world_size)
             if self.trainer.is_global_zero:
                 lg(str(self.get_log_mean(log)))
-                self.log_dict(self.get_log_mean(log), batch_size=1)
                 if self.args.wandb:
                     wandb.log(self.get_log_mean(log))
+            self.log_dict(self.get_log_mean(log), batch_size=1, sync_dist=bool(self.args.num_devices > 1)) #
             for key in list(log.keys()):
                 if "iter_" in key:
                     del self._log[key]
 
     def lg(self, key, data):
         log = self._log
-        log["iter_" + key].extend(data)
-        log[self.stage + "_" + key].extend(data)
+        log["iter/" + key].extend(data)
+        log[self.stage + "/" + key].extend(data)
 
 
 
@@ -122,7 +122,7 @@ class FlowSiteModule(GeneralModule):
             x0 = sample_prior(batch, self.args.prior_scale, harmonic=not self.args.gaussian_prior)
             x1 = batch['ligand'].shadow_pos
             eps = torch.randn_like(batch["ligand"].pos)
-            batch.t01 = torch.rand(batch.num_graphs, device=self.device)
+            batch.t01 = torch.rand(batch.num_graphs).to(batch['ligand'].pos)
             batch.normalized_t = torch.square(batch.t01)
             batch.t = batch.t01
             batch.std = batch.protein_sigma
@@ -148,26 +148,10 @@ class FlowSiteModule(GeneralModule):
             if (self.args.self_condition_inv or self.args.self_condition_x) and np.random.rand() < self.args.self_condition_ratio:
 
                 with torch.no_grad():
-                    if self.args.self_condition_bit:
-                        batch.self_condition_bit = torch.zeros((len(batch.pdb_id),1), dtype=torch.float32, device=self.device)
-                    if self.args.standard_style_self_condition_inv:
-                        original_input_feat = batch['protein'].input_feat.clone()
-                        batch['protein'].original_feat = original_input_feat.clone()
-                    res_pred, pos_list, angles = self.model(copy.deepcopy(batch), x_self=sample_prior(batch, self.args.prior_scale , harmonic=not self.args.gaussian_prior) if self.args.self_condition_x else None, x_prior=x0 if self.args.prior_condition else None)
-                if self.args.self_condition_inv:
-                    del batch['protein'].input_feat
-                    batch['protein'].input_feat = res_pred if self.args.self_condition_inv_logits else torch.argmax(res_pred, dim=1)[:, None]
-                    if self.args.self_condition_bit:
-                        batch.self_condition_bit = torch.ones((len(batch.pdb_id),1), dtype=torch.float32, device=self.device)
-                    if self.args.standard_style_self_condition_inv:
-                        del batch['protein'].original_feat
-                        batch['protein'].original_feat = original_input_feat.clone()
+                    res_pred, pos_list, angles = self.model(copy.deepcopy(batch), x_self=sample_prior(batch, self.args.prior_scale , harmonic=not self.args.gaussian_prior) if self.args.self_condition_x else None, x_prior=x0 if self.args.prior_condition else None) 
+
                 res_pred, pos_list, angles = self.model(batch, x_self =copy.deepcopy(pos_list[-1].detach()) if self.args.self_condition_x else None, x_prior=x0 if self.args.prior_condition else None)
             else:
-                if self.args.standard_style_self_condition_inv:
-                    batch['protein'].original_feat = batch['protein'].input_feat.clone()
-                if self.args.self_condition_bit:
-                    batch.self_condition_bit = torch.zeros((len(batch.pdb_id),1), dtype=torch.float32, device=self.device)
                 res_pred, pos_list, angles = self.model(copy.deepcopy(batch), x_self=sample_prior(batch, self.args.prior_scale , harmonic=not self.args.gaussian_prior) if self.args.self_condition_x else None, x_prior=x0 if self.args.prior_condition else None)
 
         except Exception as e:
@@ -190,7 +174,7 @@ class FlowSiteModule(GeneralModule):
 
         discrete_loss, designable_loss, all_res_loss, accuracy, all_res_accuracy, allmean_accuracy, allmean_all_res_accuracy, blosum_score, all_res_blosum_score, cooccur_score, all_res_cooccur_score, unnorm_blosum_score, all_res_unnorm_blosum_score = self.get_discrete_metrics(batch, res_pred)
 
-        loss = torch.zeros_like(pos_loss, device=self.device, dtype=torch.float)
+        loss = torch.zeros_like(pos_loss, dtype=torch.float)
         if self.args.residue_loss_weight > 0 and self.args.pos_only_epochs <= self.current_epoch:
             loss += discrete_loss * self.args.residue_loss_weight
         if not self.args.use_true_pos:
@@ -201,14 +185,11 @@ class FlowSiteModule(GeneralModule):
         else:
             angle_loss = torch.tensor(0.0)
 
-
-
-
         with torch.no_grad():
             self.lg("num_res", (batch.protein_size.cpu().numpy()))
             self.lg("batch_idx", [batch_idx]*len(batch.pdb_id))
             self.lg("num_ligs", (batch.num_ligs.cpu().numpy()))
-            self.lg("num_designable", ((scatter_add(batch['protein'].designable_mask.int(), batch['protein'].batch)).cpu().numpy()))
+            # self.lg("num_designable", ((scatter_add(batch['protein'].designable_mask.int(), batch['protein'].batch)).cpu().numpy()))
             self.lg("lig_size", (batch['ligand'].size).cpu().numpy())
             self.lg("name", batch.pdb_id)
             self.lg("rec_sigma", batch.protein_sigma.cpu().numpy())
@@ -217,14 +198,14 @@ class FlowSiteModule(GeneralModule):
             self.lg("sigma", batch.std.cpu().numpy())
             self.lg("aux_loss", aux_loss.cpu().numpy())
             self.lg("pos_loss", pos_loss.cpu().numpy())
-            self.lg("angle_loss", [angle_loss.cpu().numpy()])
+            # self.lg("angle_loss", [angle_loss.cpu().numpy()])
             self.lg("loss", loss.cpu().numpy())
             lowT = torch.where(batch.normalized_t <= 2 / 20)[0]
             self.lg('lowT_pos_loss', pos_loss[lowT].cpu().numpy())
             self.lg('lowT_aux_loss', aux_loss[lowT].cpu().numpy())
             self.lg('lowT_loss', loss[lowT].cpu().numpy())
             self.lg('lowT_t', batch.t[lowT].cpu().numpy())
-            if self.args.residue_loss_weight > 0:
+            if self.args.residue_loss_weight > 0: # not used when training model for docking ligands 
                 self.lg('allT_designable_loss', designable_loss.cpu().numpy())
                 self.lg('allT_all_res_loss', all_res_loss.cpu().numpy())
                 self.lg('allT_accuracy', accuracy.cpu().numpy())
@@ -251,15 +232,15 @@ class FlowSiteModule(GeneralModule):
                     x1_out = pos_list[-1]
                 else:
                     if self.args.flow_matching:
-                        x1_out, x1, res_pred, logit_traj = self.flow_match_inference(batch, batch_idx)
+                        x1_out, x1, res_pred = self.flow_match_inference(batch, batch_idx)
                     else:
-                        x1_out, x1, res_pred, logit_traj = self.harmonic_inference(batch, batch_idx)
+                        x1_out, x1, res_pred = self.harmonic_inference(batch, batch_idx)
 
                 angle_loss = supervised_chi_loss(batch, angles, angles_idx_s=11 - self.args.num_angle_pred) if self.args.num_angle_pred > 0 else torch.tensor(0.0)
                 recovered_aa_angle_loss = get_recovered_aa_angle_loss(copy.deepcopy(batch), angles, res_pred, angles_idx_s=11-self.args.num_angle_pred) if self.args.num_angle_pred > 0 else torch.tensor(0.0)
 
-                rmsd, centroid_rmsd, kabsch_rmsd = compute_rmsds(batch['ligand'].shadow_pos2, x1, batch )
-                rmsd_out, centroid_rmsd_out, kabsch_rmsd_out = compute_rmsds(batch['ligand'].shadow_pos2, x1_out, batch)
+                rmsd, centroid_rmsd, kabsch_rmsd = compute_rmsds(batch["ligand"].shadow_pos2, x1, batch )
+                rmsd_out, centroid_rmsd_out, kabsch_rmsd_out = compute_rmsds(batch["ligand"].shadow_pos2, x1_out, batch)
 
                 self.log_3D_metrics(rmsd, centroid_rmsd, kabsch_rmsd, suffix="")
                 self.log_3D_metrics(rmsd_out, centroid_rmsd_out, kabsch_rmsd_out, suffix="_out")
@@ -309,26 +290,26 @@ class FlowSiteModule(GeneralModule):
     def flow_match_inference(self, batch, batch_idx=None, production_mode = False):
         # be careful, the meaning of x0 and x1 is reversed here in flow matching compared to diffusion
 
-        x0 = sample_prior(batch, self.args.prior_scale , harmonic=not self.args.gaussian_prior)
+        x0 = sample_prior(batch, self.args.prior_scale, harmonic=not self.args.gaussian_prior)
         if self.args.self_condition_inv:
             batch['protein'].input_feat = batch['protein'].feat * 0 + len(atom_features_list['residues_canonical'])
         x_self = sample_prior(batch, self.args.prior_scale , harmonic=not self.args.gaussian_prior) if self.args.self_condition_x else None
         if self.args.self_condition_bit:
-            batch.self_condition_bit = torch.zeros((len(batch.pdb_id), 1), dtype=torch.float32, device=self.device)
+            batch.self_condition_bit = torch.zeros((len(batch.pdb_id), 1), dtype=torch.float32)
 
         # at t=0, we are at x0
-        t_span = torch.linspace(0, 1, self.args.num_integration_steps, device=self.device)
+        t_span = torch.linspace(0, 1, self.args.num_integration_steps)
         t, dt = t_span[0], t_span[1] - t_span[0]
 
         sol = [x0]
         model_pred = [x0]
-        logit_traj = [torch.nn.functional.one_hot(batch['protein'].feat.squeeze() * 0, len(atom_features_list['residues_canonical']))]
         xt = x0
         steps = 1
         while steps <= len(t_span) - 1:
             batch["ligand"].pos = xt
-            batch.t01 = t.expand(len(batch.pdb_id)).to(self.device)
+            batch.t01 = t.expand(len(batch.pdb_id)).to(x0)
             res_pred, pos_list, angles = self.model(batch, x_self=x_self, x_prior=x0 if self.args.prior_condition else None)
+            x1_pred = pos_list[-1]
             x1_pred = pos_list[-1]
             vt = x1_pred - x0 if not self.args.velocity_prediction else x1_pred
             if self.args.corr_integration:
@@ -344,18 +325,17 @@ class FlowSiteModule(GeneralModule):
             if self.args.self_condition_x:
                 x_self = x1_pred
             if self.args.self_condition_bit:
-                batch.self_condition_bit = torch.ones((len(batch.pdb_id), 1), dtype=torch.float32, device=self.device)
+                batch.self_condition_bit = torch.ones((len(batch.pdb_id), 1), dtype=torch.float32)
 
             sol.append(xt)
             model_pred.append(x1_pred)
-            logit_traj.append(res_pred)
             if steps < len(t_span) - 1: dt = t_span[steps + 1] - t
             steps += 1
 
         if self.args.save_inference and (batch_idx == 0 or self.args.save_all_batches) and self.inference_counter % self.args.inference_save_freq == 0 or self.stage == "pred" and self.args.save_inference and self.args.save_all_batches:
             self.inference_counter = 0
-            save_trajectory_pdb(self.args, batch, sol, model_pred, logit_traj, extra_string=f'{self.stage}_{self.trainer.global_step}globalStep', production_mode=production_mode, out_dir=os.path.join(self.args.out_dir, 'structures') if production_mode else None)
-        return x1_pred, xt, res_pred, logit_traj
+            save_trajectory_pdb(self.args, batch, sol, model_pred, extra_string=f'{self.stage}_{self.trainer.global_step}globalStep', production_mode=production_mode, out_dir=os.path.join(self.args.out_dir, 'structures') if production_mode else None)
+        return x1_pred, xt, res_pred
 
     @torch.no_grad()
     def harmonic_inference(self, batch, batch_idx=None):
@@ -374,7 +354,6 @@ class FlowSiteModule(GeneralModule):
         lamb = batch.D
         sol = [xt]
         model_pred = [xt]
-        logit_traj = [torch.nn.functional.one_hot(batch['protein'].feat.squeeze() * 0, len(atom_features_list['residues_canonical']))]
         very_first_x0 = None
         for idx, (t, s, t01) in enumerate(zip(ts[:-1], ts[1:], times01[1:])):
             batch["ligand"].pos = xt
@@ -408,13 +387,11 @@ class FlowSiteModule(GeneralModule):
 
             sol.append(xt)
             model_pred.append(x0)
-            logit_traj.append(res_pred)
 
         if self.args.save_inference and (batch_idx == 0 or self.args.save_all_batches) and self.inference_counter % self.args.inference_save_freq == 0 or self.stage == "pred" and self.args.save_inference and self.args.save_all_batches:
             self.inference_counter = 0
-            save_trajectory_pdb(self.args, batch, sol, model_pred, logit_traj, extra_string=f'{self.stage}_{self.trainer.global_step}globalStep')
-        return x0, xt, res_pred, logit_traj
-
+            save_trajectory_pdb(self.args, batch, sol, model_pred, extra_string=f'{self.stage}_{self.trainer.global_step}globalStep')
+        return x0, xt, res_pred
 
     def get_discrete_metrics(self, batch, res_pred):
         prot_bid = batch["protein"].batch
@@ -440,8 +417,6 @@ class FlowSiteModule(GeneralModule):
 
         return discrete_loss, designable_loss, all_res_loss, accuracy, all_res_accuracy, allmean_accuracy, allmean_all_res_accuracy, blosum_score, all_res_blosum_score, cooccur_score, all_res_cooccur_score, unnorm_blosum_score, all_res_unnorm_blosum_score
 
-
-
     def get_log_mean(self, log):
         out = {}
         out['trainer/global_step'] = float(self.trainer.global_step)
@@ -453,10 +428,10 @@ class FlowSiteModule(GeneralModule):
         aggregated_log = {}
         if self.stage == "pred" and not 'iter_name' in list(log.keys()):
             for key, value in log.items():
-                if isinstance(value, list) and len(value) == len(log['pred_num_res']):
+                if isinstance(value, list) and len(value) == len(log['pred/num_res']):
                     aggregated_list = []
-                    for i in range(max(log['pred_batch_idx']) + 1):
-                        values_for_batch = np.array(value)[np.where(np.array(log['pred_batch_idx']) == i)[0]]
+                    for i in range(max(log['pred/batch_idx']) + 1):
+                        values_for_batch = np.array(value)[np.where(np.array(log['pred/batch_idx']) == i)[0]]
                         aggregated_list.append(values_for_batch.reshape(self.args.num_inference, -1))
                     temporary_log[key] = np.concatenate(aggregated_list, axis=1)
                 else:
@@ -465,13 +440,13 @@ class FlowSiteModule(GeneralModule):
             for key, value in temporary_log.items():
                 if 'rmsd' in key and not '_std' in key:
                     pass
-                top10_rmsd_order = np.argsort(temporary_log['pred_rmsd'][:10], axis=0)
-                top5_rmsd_order = np.argsort(temporary_log['pred_rmsd'][:5], axis=0)
+                top10_rmsd_order = np.argsort(temporary_log['pred/rmsd'][:10], axis=0)
+                top5_rmsd_order = np.argsort(temporary_log['pred/rmsd'][:5], axis=0)
                 aggregated_log[key + '_msdTop10'] = np.take_along_axis(temporary_log[key][:10], top10_rmsd_order, axis=0)[0]
                 aggregated_log[key + '_msdTop5'] = np.take_along_axis(temporary_log[key][:5], top5_rmsd_order, axis=0)[0]
                 if self.args.residue_loss_weight > 0:
-                    top10_aar_order = np.argsort(temporary_log['pred_accuracy'][:10], axis=0)[::-1]
-                    top5_aar_order = np.argsort(temporary_log['pred_accuracy'][:5], axis=0)[::-1]
+                    top10_aar_order = np.argsort(temporary_log['pred/accuracy'][:10], axis=0)[::-1]
+                    top5_aar_order = np.argsort(temporary_log['pred/accuracy'][:5], axis=0)[::-1]
                     aggregated_log[key + '_aarTop10'] = np.take_along_axis(temporary_log[key][:10], top10_aar_order, axis=0)[:10][0]
                     aggregated_log[key + '_aarTop5'] = np.take_along_axis(temporary_log[key][:5], top5_aar_order, axis=0)[:5][0]
                 try:
@@ -506,9 +481,9 @@ class FlowSiteModule(GeneralModule):
         for i in range(self.args.num_inference):
             batch_ = copy.deepcopy(batch)
             if self.args.flow_matching:
-                x1_out, x1, res_pred, logit_traj = self.flow_match_inference(batch_, batch_idx, production_mode=True)
+                x1_out, x1, res_pred = self.flow_match_inference(batch_, batch_idx, production_mode=True)
             else:
-                x1_out, x1, res_pred, logit_traj = self.harmonic_inference(batch_, batch_idx)
+                x1_out, x1, res_pred = self.harmonic_inference(batch_, batch_idx)
             full_designed_mask = torch.logical_and(batch['full_protein'].designable_mask, batch['full_protein'].pocket_mask)
             assert full_designed_mask.sum() == batch['protein'].designable_mask.sum()
 
@@ -580,23 +555,23 @@ class FlowSiteModule(GeneralModule):
 
     def on_epoch_end(self, stage):
         log = self._log
-        log = {key: log[key] for key in log if f"{stage}_" in key}
+        log = {key: log[key] for key in log if f"{stage}/" in key}
         log = gather_log(log, self.trainer.world_size)
         log['invalid_grads_per_epoch'] = self.num_invalid_gradients
+        self.log_dict(self.get_log_mean(log), batch_size=1, sync_dist=bool(self.args.num_devices > 1)) #
         if self.trainer.is_global_zero:
             print('Run name:', self.args.run_name)
             lg(str(self.get_log_mean(log)))
-            self.log_dict(self.get_log_mean(log), batch_size=1)
             if self.args.wandb:
                 wandb.log(self.get_log_mean(log), step=self.trainer.global_step)
             path = os.path.join(os.environ["MODEL_DIR"], f"{stage}_{self.trainer.current_epoch}.csv")
             log_clone = copy.deepcopy(log)
             for key in list(log_clone.keys()):
-                if f"{stage}_" in key and ('lowT' in key or '_time' in key) or 'allmean_' in key or 'angle_loss' in key or 'invalid_grads_per_epoch' in key:
+                if f"{stage}/" in key and ('lowT' in key or '_time' in key) or 'allmean_' in key or 'angle_loss' in key or 'invalid_grads_per_epoch' in key:
                     del log_clone[key]
             pd.DataFrame(log_clone).to_csv(path)
         for key in list(log.keys()):
-            if f"{stage}_" in key:
+            if f"{stage}/" in key:
                 del self._log[key]
         self.num_invalid_gradients = 0
 

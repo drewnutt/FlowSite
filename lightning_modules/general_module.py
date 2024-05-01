@@ -7,7 +7,7 @@ from utils.logging import lg
 
 
 class GeneralModule(pl.LightningModule):
-    def __init__(self, args, device, model):
+    def __init__(self, args, model):
         super().__init__()
         self.args = args
         self.model = model

@@ -64,7 +64,7 @@ class PDBFile:
         with open(path, "w") as f:
             f.write(str_)
 
-def save_trajectory_pdb(args, batch, xts_list, x1s_list, logits_list, extra_string = '', production_mode= False, out_dir=None):
+def save_trajectory_pdb(args, batch, xts_list, x1s_list, extra_string = '', production_mode= False, out_dir=None):
     bid = batch["ligand"].batch
     prot_bid = batch["protein"].batch
     if out_dir is None:
@@ -87,7 +87,6 @@ def save_trajectory_pdb(args, batch, xts_list, x1s_list, logits_list, extra_stri
                 f_xt.add((xt[torch.where(bid == i)[0]]).detach().cpu() + center_offset, order=idx + 1, part=0)
                 f_x1.add((x1[torch.where(bid == i)[0]]).detach().cpu() + center_offset, order=idx + 1, part=0)
 
-    logit_trajs = torch.stack(logits_list, dim=0)
     xt_trajs = torch.stack(xts_list, dim=0)
     x1_trajs = torch.stack(x1s_list, dim=0)
     for i, (f_xt, f_preds) in enumerate(zip(pdb_files_xt, pdb_files_x1)):
@@ -98,10 +97,8 @@ def save_trajectory_pdb(args, batch, xts_list, x1s_list, logits_list, extra_stri
         center_offset = (batch.original_center[i].detach().cpu() + batch.pocket_center[i].detach().cpu())
         xt_traj = (xt_trajs[:,torch.where(bid == i)[0],:]).detach().cpu() + center_offset
         x1_traj = (x1_trajs[:,torch.where(bid == i)[0],:]).detach().cpu() + center_offset
-        logit_traj = (logit_trajs[:,torch.where(prot_bid == i)[0],:]).detach().cpu()
         np.save(f"{out_dir}/{batch.pdb_id[i]}/{batch.pdb_id[i]}_{extra_string}_xt.npy", xt_traj)
         np.save(f"{out_dir}/{batch.pdb_id[i]}/{batch.pdb_id[i]}_{extra_string}_x1.npy", x1_traj)
-        np.save(f"{out_dir}/{batch.pdb_id[i]}/{batch.pdb_id[i]}_{extra_string}_logits.npy", logit_traj)
 
 
 def plot_point_cloud(point_clouds):

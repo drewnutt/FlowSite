@@ -6,7 +6,7 @@ def parse_train_args(args=sys.argv[1:]):
     parser = ArgumentParser()
     # Logging
     parser.add_argument('--warn_with_traceback', action='store_true', default=False, help='')
-    parser.add_argument('--run_name', type=str, default='default', help='')
+    parser.add_argument('--run_name', type=str, default='', help='')
     parser.add_argument('--wandb', action='store_true', default=False, help='Whether or not to use wandb for logging')
     parser.add_argument('--project', type=str, default='pocket_gen', help='The name of the wandb project')
     parser.add_argument('--debug', action='store_true', default=False)
@@ -47,6 +47,7 @@ def parse_train_args(args=sys.argv[1:]):
     parser.add_argument('--lr_end', type=float, default=1)
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--num_workers', type=int, default=4)
+    parser.add_argument('--num_devices', type=int, default=1)
     parser.add_argument('--clamp_loss', type=float, default=None)
     parser.add_argument('--plateau_scheduler', action='store_true', default=False, help='')
     parser.add_argument('--fake_constant_dur', type=float, default=0, help='for how long to do fake ligand training with fake_ratio_start')
@@ -141,7 +142,6 @@ def parse_train_args(args=sys.argv[1:]):
     parser.add_argument('--diffdockpocket_ligpos', action='store_true', default=False, help='')
     parser.add_argument('--filter_dd_wrong_len', action='store_true', default=False, help='')
 
-
     # Pocket parameters
     parser.add_argument('--design_residue_cutoff', type=float, default=4, help='for the residues that should be predicted/generated')
     parser.add_argument('--pocket_residue_cutoff', type=float, default=None, help='for the residues that will be included as input to make the predictions')
@@ -149,7 +149,6 @@ def parse_train_args(args=sys.argv[1:]):
     parser.add_argument('--radius_pocket_buffer', type=float, default=10, help='Buffer that is added to the ligand radius when choosing the distance for including residues in the pocket')
     parser.add_argument('--pocket_residue_cutoff_sigma', type=float, default=0, help='Noise to add to minimum ligand distance for distance pockets')
     parser.add_argument('--pocket_center_sigma', type=float, default=0, help='Noise to add to the pocket center')
-
     ## Equivariant TFN refinement layers
     parser.add_argument('--use_tfn', action='store_true', default=False)
     parser.add_argument('--num_tfn_layers', type=int, default=6, help='Number of interaction layers')
