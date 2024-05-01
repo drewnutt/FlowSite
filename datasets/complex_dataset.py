@@ -31,10 +31,9 @@ class EmptyPocketException(Exception):
 
 
 class ComplexDataset(Dataset):
-    def __init__(self, args, split_path, data_source, data_dir, multiplicity = 1, device='cpu', inference=False):
+    def __init__(self, args, split_path, data_source, data_dir, multiplicity = 1, inference=False):
         super(ComplexDataset, self).__init__()
         self.args = args
-        self.device = device
         self.data_source = data_source
         self.data_dir = data_dir
         assert not (args.correct_moad_lig_selection and args.double_correct_moad_lig_selection)
@@ -218,29 +217,10 @@ class ComplexDataset(Dataset):
             lg(e)
             return self.get(torch.randint(low=0, high=self.len(), size=(1,)).item())
 
-        if self.args.self_condition_inv:
-            data['protein'].input_feat = torch.zeros_like(data['protein'].feat) + len(atom_features_list['residues_canonical']) # mask out all the residues
         if self.args.tfn_use_aa_identities:
             data['protein'].input_feat = data['protein'].feat.clone()
         data.protein_sigma = (torch.square(data["protein"].pos).mean() ** 0.5)
-        if self.args.mask_lig_translation:
-            data['ligand'].pos -= data['ligand'].pos.mean(dim=0, keepdim=True)
-            data['ligand'].pos += data['protein'].pos.mean(dim=0, keepdim=True)
-        if self.args.mask_lig_rotation:
-            temp_lig_pos = data['ligand'].pos - data['ligand'].pos.mean(dim=0, keepdim=True)
-            temp_lig_pos = temp_lig_pos @ torch.from_numpy(Rotation.random().as_matrix()).float()
-            temp_lig_pos += data['ligand'].pos.mean(dim=0, keepdim=True)
-            data['ligand'].pos = temp_lig_pos
-        if self.args.mask_lig_pos:
-            center = data['ligand'].pos.mean(dim=0)
-            data['ligand'].pos = torch.randn_like(data['ligand'].pos)
-            data['ligand'].pos += center
-        if self.args.backbone_noise > 0:
-            data['protein'].pos += torch.randn_like(data['protein'].pos) * self.args.backbone_noise
-            data['protein'].pos_N += torch.randn_like(data['protein'].pos_N) * self.args.backbone_noise
-            data['protein'].pos_O += torch.randn_like(data['protein'].pos_O) * self.args.backbone_noise
-            data['protein'].pos_C += torch.randn_like(data['protein'].pos_C) * self.args.backbone_noise
-            data['protein'].pos_Cb += torch.randn_like(data['protein'].pos_Cb) * self.args.backbone_noise
+
         if self.args.diffdockpocket_ligpos:
             dd_pos = copy.deepcopy(self.diffdock_ligpos[data.pdb_id][0])
             if self.args.filter_dd_wrong_len and len(dd_pos) != len(data['ligand'].pos):
@@ -257,7 +237,7 @@ class ComplexDataset(Dataset):
             print('WARNING: only this many residues in the pocket ', len(data['protein'].pos))
         if torch.isnan(data['protein'].pos).any():
             print('protein pos', data['protein'].pos)
-            raise Exception('Nan encounered in protein positions of ', data.pdb_id)
+            raise Exception('Nan encountered in protein positions of ', data.pdb_id)
         return data
     def get_pocket(self, data, pocket_type = None):
         if pocket_type is None:
@@ -504,7 +484,7 @@ class ComplexDataset(Dataset):
         home_directory = os.getenv("HOME")
         os.environ['HOME'] = 'data/esm_weights'
         esm_lm, alphabet = load_model_and_alphabet("esm2_t36_3B_UR50D")
-        esm_lm = esm_lm.to(self.device)
+        esm_lm = esm_lm
         os.environ['HOME'] = home_directory
         batch_converter = alphabet.get_batch_converter()
         chainwise_sequences = []
@@ -526,7 +506,7 @@ class ComplexDataset(Dataset):
         chainwise_sequences = [(i, s) for i, s in enumerate(chainwise_sequences)]
         batch_labels, batch_strs, batch_tokens = batch_converter(chainwise_sequences)
         print('Running ESM language model')
-        out = esm_lm(batch_tokens.to(self.device), repr_layers=[esm_lm.num_layers], return_contacts=False)
+        out = esm_lm(batch_tokens, repr_layers=[esm_lm.num_layers], return_contacts=False)
         print('Done running ESM language model')
         sequences = []
         for i, chain_to_prot_idx in enumerate(chain_to_prot_indices):
