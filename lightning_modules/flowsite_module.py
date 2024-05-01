@@ -148,10 +148,10 @@ class FlowSiteModule(GeneralModule):
             if (self.args.self_condition_inv or self.args.self_condition_x) and np.random.rand() < self.args.self_condition_ratio:
 
                 with torch.no_grad():
-                    res_pred, pos_list, angles = self.model(copy.deepcopy(batch), x_self=sample_prior(batch, self.args.prior_scale , harmonic=not self.args.gaussian_prior) if self.args.self_condition_x else None, x_prior=x0 if self.args.prior_condition else None)
-                res_pred, pos_list, angles = self.model(batch, x_self =copy.deepcopy(pos_list[-1].detach()) if self.args.self_condition_x else None, x_prior=x0 if self.args.prior_condition else None)
+                    res_pred, pos_list, angles, _ = self.model(copy.deepcopy(batch), x_self=sample_prior(batch, self.args.prior_scale , harmonic=not self.args.gaussian_prior) if self.args.self_condition_x else None, x_prior=x0 if self.args.prior_condition else None)
+                res_pred, pos_list, angles, conf_score = self.model(batch, x_self =copy.deepcopy(pos_list[-1].detach()) if self.args.self_condition_x else None, x_prior=x0 if self.args.prior_condition else None)
             else:
-                res_pred, pos_list, angles = self.model(copy.deepcopy(batch), x_self=sample_prior(batch, self.args.prior_scale , harmonic=not self.args.gaussian_prior) if self.args.self_condition_x else None, x_prior=x0 if self.args.prior_condition else None)
+                res_pred, pos_list, angles, conf_score = self.model(copy.deepcopy(batch), x_self=sample_prior(batch, self.args.prior_scale , harmonic=not self.args.gaussian_prior) if self.args.self_condition_x else None, x_prior=x0 if self.args.prior_condition else None)
 
         except Exception as e:
             lg("Error forward pass")
