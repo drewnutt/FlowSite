@@ -186,9 +186,8 @@ class FlowSiteModule(GeneralModule):
 
         if self.args.confidence_loss_weight > 0:
             with torch.no_grad():
-                if new_idx_iso is None:
-                    new_idx_iso = self.update_iso(training_target, pos_list[-1], batch)
-                    training_target = training_target.index_select(0, new_idx_iso)
+                new_idx_iso = self.update_iso(training_target, pos_list[-1], batch)
+                training_target = training_target.index_select(0, new_idx_iso)
                 # get the RMSD of the each ligand in the batch
                 square_devs = torch.square(training_target - pos_list[-1])
                 rmsd = scatter_mean(square_devs.sum(-1), bid, -1).sqrt().detach()
@@ -204,8 +203,8 @@ class FlowSiteModule(GeneralModule):
 
             # add the confidence loss to the total loss
             weight_confidence = (confidence_loss.squeeze() * batch.t01)
-            if self.args.clamp_loss:
-                confidence_loss = torch.clamp(weight_confidence, max=self.args.clamp_loss)
+            if self.args.clamp_loss is not None:
+                weight_confidence = torch.clamp(weight_confidence, max=self.args.clamp_loss)
             loss += weight_confidence * self.args.confidence_loss_weight
         else:
             weight_confidence = torch.tensor(0.0)
