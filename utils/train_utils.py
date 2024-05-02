@@ -3,12 +3,25 @@ import numbers
 from torch_scatter import scatter_mean, scatter_sum
 import numpy as np
 import torch
+from torch.utils.data import Sampler
 from scipy.spatial.transform import Rotation
+from scipy.stats import pearsonr, kendalltau
+from sklearn.metrics import roc_auc_score
 
 from utils.mmcif import chi_pi_periodic_torch
 from utils.residue_constants import blosum_numeric, blosum_62_cooccurrance_probs
 
 
+class DuplicateSampler(Sampler):
+    def __init__(self, data_source, num_duplicates):
+        self.data_source = data_source
+        self.num_duplicates = num_duplicates
+
+    def __iter__(self):
+        yield from [idx for idx in range(len(self.data_source)) for _ in range(self.num_duplicates)]
+
+    def __len__(self):
+        return len(self.data_source) * self.num_duplicates
 
 def get_cooccur_score( res_pred, res_true, batch_idx):
     probs = blosum_62_cooccurrance_probs.to(res_pred.device)
@@ -128,3 +141,20 @@ def get_recovered_aa_angle_loss(batch, angles, res_pred, angles_idx_s=0, angles_
     if correctly_predicted.sum() == 0:
         return torch.tensor(0.0)
     return supervised_chi_loss(batch, angles, angles_idx_s=angles_idx_s, angles_idx=angles_idx)
+
+def get_confidence_metrics(rmsds, confidence, conf_type):
+    mse = None
+    auroc = None
+    if conf_type == "Conf":
+        low_rmsd = (rmsd <= 2.0)
+        auroc = roc_auc_score(low_rmsd, confidence)
+        rmsds = rmsds * -1
+    elif conf_type == "RMSD":
+        # calculate the MSE of the RMSD
+        mse = torch.mean(torch.square(rmsds - confidence))
+        
+    pearson_r, _ = pearsonr(rmsds, confidence)
+    kendall_tau, _ = kendalltau(rmsds, confidence)
+    return mse, auroc, pearson_r, kendall_tau
+
+

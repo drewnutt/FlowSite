@@ -16,6 +16,7 @@ import torch
 from torch_geometric.loader import DataLoader
 from datasets.complex_dataset import ComplexDataset
 from utils.parsing import parse_train_args
+from utils.train_utils import DuplicateSampler
 
 def main_function():
     args = parse_train_args()
@@ -45,10 +46,10 @@ def main_function():
     train_data.fake_lig_ratio = args.fake_ratio_start
     val_data = ComplexDataset(args, args.val_split_path, data_source=args.data_source, data_dir=args.data_dir)
     train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True)
-    val_loader = DataLoader(val_data, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=True)
+    val_loader = DataLoader(val_data, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=True, sampler=DuplicateSampler(val_data, args.batch_size) if args.confidence_loss_weight > 0 else None)
     if args.predict_split_path is not None:
         predict_data = ComplexDataset(args, args.predict_split_path, data_source=args.data_source, data_dir=args.data_dir)
-        predict_loader = DataLoader(predict_data, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=True)
+        predict_loader = DataLoader(predict_data, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=True, sampler=DuplicateSampler(val_data, args.batch_size) if args.confidence_loss_weight > 0 else None)
     else:
         predict_loader = None
     lg(f'Train data: {len(train_data)}')

@@ -16,7 +16,7 @@ from utils.logging import lg
 from utils.mmcif import RESTYPES
 
 from utils.train_utils import compute_rmsds, supervised_chi_loss, get_blosum_score, get_cooccur_score, \
-    get_recovered_aa_angle_loss, get_unnorm_blosum_score
+    get_recovered_aa_angle_loss, get_unnorm_blosum_score, get_confidence_metrics
 from utils.visualize import  save_trajectory_pdb
 
 
@@ -258,7 +258,10 @@ class FlowSiteModule(GeneralModule):
                     x1_out = pos_list[-1]
                 else:
                     if self.args.flow_matching:
-                        x1_out, x1, res_pred, conf_score = self.flow_match_inference(batch, batch_idx)
+                        if self.args.confidence_loss_weight == 0:
+                            x1_out, x1, res_pred, conf_score = self.flow_match_inference(batch, batch_idx)
+                        else:
+                            x1_out, x1, conf_score, symmetric_rmsd = self.flow_match_duplicate_inference(batch, batch_idx)
                     else:
                         x1_out, x1, res_pred, conf_score = self.harmonic_inference(batch, batch_idx)
 
@@ -270,6 +273,11 @@ class FlowSiteModule(GeneralModule):
 
                 self.log_3D_metrics(rmsd, centroid_rmsd, kabsch_rmsd, suffix="")
                 self.log_3D_metrics(rmsd_out, centroid_rmsd_out, kabsch_rmsd_out, suffix="_out")
+
+
+                if self.args.confidence_loss_weight > 0:
+                    self.lg('symmetric_rmsd', symmetric_rmsd.cpu().numpy())
+                    self.lg('conf_score', conf_score.cpu().numpy())
 
                 if self.args.residue_loss_weight > 0:
                     discrete_loss, designable_loss, all_res_loss, accuracy, all_res_accuracy, allmean_accuracy, allmean_all_res_accuracy, blosum_score, all_res_blosum_score, cooccur_score, all_res_cooccur_score, unnorm_blosum_score, all_res_unnorm_blosum_score = self.get_discrete_metrics(batch, res_pred)
@@ -311,7 +319,58 @@ class FlowSiteModule(GeneralModule):
         self.lg(f"kabsch_rmsd<2{suffix}", (kabsch_rmsd < 2))
         self.lg(f"kabsch_rmsd<5{suffix}", (kabsch_rmsd < 5))
 
+    @torch.no_grad()
+    def flow_match_duplicate_inference(self, batch, batch_idx=None, production_mode = False):
+        # be careful, the meaning of x0 and x1 is reversed here in flow matching compared to diffusion
 
+        x0 = sample_prior(batch, self.args.prior_scale , harmonic=not self.args.gaussian_prior)
+        x_self = sample_prior(batch, self.args.prior_scale , harmonic=not self.args.gaussian_prior) if self.args.self_condition_x else None
+
+        training_target = batch['ligand'].shadow_pos if not self.args.velocity_prediction else batch['ligand'].shadow_pos - x0
+        # at t=0, we are at x0
+        t_span = torch.linspace(0, 1, self.args.num_integration_steps)
+        t, dt = t_span[0], t_span[1] - t_span[0]
+
+        sol = [x0]
+        model_pred = [x0]
+        confidences = [torch.zeros(len(batch)).to(x0)]
+        xt = x0
+        steps = 1
+        while steps <= len(t_span) - 1:
+            batch["ligand"].pos = xt
+            batch.t01 = t.expand(len(batch.pdb_id)).to(x0)
+            res_pred, pos_list, angles, conf_score = self.model(batch, x_self=x_self, x_prior=x0 if self.args.prior_condition else None)
+            x1_pred = pos_list[-1]
+            vt = x1_pred - x0 if not self.args.velocity_prediction else x1_pred
+            if self.args.corr_integration:
+                vt = (x1_pred - xt)/(1-t) if not self.args.velocity_prediction else x1_pred
+            xt = xt + dt * vt
+            t = t + dt
+
+
+            if self.args.self_condition_x:
+                x_self = x1_pred
+
+            sol.append(xt)
+            model_pred.append(x1_pred)
+            if self.args.score_output == "Conf":
+                conf_score = torch.nn.functional.softmax(conf_score, dim=1)[:,1]
+            elif self.args.score_output == "RMSD":
+                conf_score = conf_score.squeeze()
+            confidences.append(conf_score)
+            if steps < len(t_span) - 1: dt = t_span[steps + 1] - t
+            steps += 1
+
+        new_idx_iso = self.update_iso(training_target, x1_pred, batch)
+        training_target = training_target.index_select(0, new_idx_iso)  
+        square_devs = torch.square(training_target - x1_pred)
+        rmsd = scatter_mean(square_devs.sum(-1), batch["ligand"].batch, -1).sqrt().detach()
+
+        if self.args.save_inference and (batch_idx == 0 or self.args.save_all_batches) and self.inference_counter % self.args.inference_save_freq == 0 or self.stage == "pred" and self.args.save_inference and self.args.save_all_batches:
+            self.inference_counter = 0
+            save_multiple_confs_sdf(self.args, batch, xt, x1_pred, conf_score, extra_string=f'{self.stage}_{self.trainer.global_step}globalStep', production_mode=production_mode, out_dir=os.path.join(self.args.out_dir, 'structures') if production_mode else None, descending=False if self.args.score_output == "RMSD" else True)
+        return x1_pred, xt, conf_score, rmsd
+    
     @torch.no_grad()
     def flow_match_inference(self, batch, batch_idx=None, production_mode = False):
         # be careful, the meaning of x0 and x1 is reversed here in flow matching compared to diffusion
@@ -329,6 +388,7 @@ class FlowSiteModule(GeneralModule):
 
         sol = [x0]
         model_pred = [x0]
+        confidences = [torch.zeros(len(batch)).to(x0)]
         xt = x0
         steps = 1
         while steps <= len(t_span) - 1:
@@ -354,6 +414,11 @@ class FlowSiteModule(GeneralModule):
 
             sol.append(xt)
             model_pred.append(x1_pred)
+            if self.args.score_output == "Conf":
+                conf_score = torch.nn.functional.softmax(conf_score, dim=1)[:,1]
+            elif self.args.score_output == "RMSD":
+                conf_score = conf_score.squeeze()
+            confidences.append(conf_score)
             if steps < len(t_span) - 1: dt = t_span[steps + 1] - t
             steps += 1
 
@@ -615,6 +680,12 @@ class FlowSiteModule(GeneralModule):
         log = self._log
         log = {key: log[key] for key in log if f"{stage}/" in key}
         log = gather_log(log, self.trainer.world_size)
+        if self.stage == "val" and self.args.confidence_loss_weight > 0:
+            mse, auroc, pearson_r, kendalltau = get_confidence_metrics(log['symmetric_rmsd'], log['conf_score'], self.args.score_output)
+            log[f'{stage}/confidence_mse'] = mse
+            log[f'{stage}/confidence_auroc'] = auroc
+            log[f'{stage}/confidence_pearson_r'] = pearson_r
+            log[f'{stage}/confidence_kendalltau'] = kendalltau
         log['invalid_grads_per_epoch'] = self.num_invalid_gradients
         self.log_dict(self.get_log_mean(log), batch_size=1, sync_dist=bool(self.args.num_devices > 1)) #
         if self.trainer.is_global_zero:
