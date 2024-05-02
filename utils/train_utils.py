@@ -143,6 +143,11 @@ def get_recovered_aa_angle_loss(batch, angles, res_pred, angles_idx_s=0, angles_
     return supervised_chi_loss(batch, angles, angles_idx_s=angles_idx_s, angles_idx=angles_idx)
 
 def get_confidence_metrics(rmsds, confidence, conf_type):
+    # if rmsds is not a numpy array, convert it to a numpy array
+    if not isinstance(rmsds, np.ndarray):
+        rmsds = np.array(rmsds)
+    if not isinstance(confidence, np.ndarray):
+        confidence = np.array(confidence)
     mse = None
     auroc = None
     if conf_type == "Conf":
@@ -151,7 +156,7 @@ def get_confidence_metrics(rmsds, confidence, conf_type):
         rmsds = rmsds * -1
     elif conf_type == "RMSD":
         # calculate the MSE of the RMSD
-        mse = torch.mean(torch.square(rmsds - confidence))
+        mse = np.mean(np.square(rmsds - confidence))
         
     pearson_r, _ = pearsonr(rmsds, confidence)
     kendall_tau, _ = kendalltau(rmsds, confidence)

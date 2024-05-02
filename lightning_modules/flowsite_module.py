@@ -679,12 +679,16 @@ class FlowSiteModule(GeneralModule):
         log = self._log
         log = {key: log[key] for key in log if f"{stage}/" in key}
         log = gather_log(log, self.trainer.world_size)
-        if self.stage == "val" and self.args.confidence_loss_weight > 0:
-            mse, auroc, pearson_r, kendalltau = get_confidence_metrics(log['symmetric_rmsd'], log['conf_score'], self.args.score_output)
+        if stage in ["val", "pred"] and self.args.confidence_loss_weight > 0:
+            mse, auroc, pearson_r, kendalltau = get_confidence_metrics(log[f'{stage}/symmetric_rmsd'], log[f'{stage}/conf_score'], self.args.score_output)
             log[f'{stage}/confidence_mse'] = mse
             log[f'{stage}/confidence_auroc'] = auroc
             log[f'{stage}/confidence_pearson_r'] = pearson_r
             log[f'{stage}/confidence_kendalltau'] = kendalltau
+            del log[f'{stage}/symmetric_rmsd']
+            del log[f'{stage}/conf_score']
+            del self._log[f'{stage}/symmetric_rmsd']
+            del self._log[f'{stage}/conf_score']
         log['invalid_grads_per_epoch'] = self.num_invalid_gradients
         self.log_dict(self.get_log_mean(log), batch_size=1, sync_dist=bool(self.args.num_devices > 1)) #
         if self.trainer.is_global_zero:
@@ -695,12 +699,13 @@ class FlowSiteModule(GeneralModule):
             path = os.path.join(os.environ["MODEL_DIR"], f"{stage}_{self.trainer.current_epoch}.csv")
             log_clone = copy.deepcopy(log)
             for key in list(log_clone.keys()):
-                if f"{stage}/" in key and ('lowT' in key or '_time' in key) or 'allmean_' in key or 'angle_loss' in key or 'invalid_grads_per_epoch' in key:
+                if f"{stage}/" in key and ('lowT' in key or '_time' in key) or 'allmean_' in key or 'angle_loss' in key or 'invalid_grads_per_epoch' in key or 'confidence' in key:
                     del log_clone[key]
             pd.DataFrame(log_clone).to_csv(path)
         for key in list(log.keys()):
-            if f"{stage}/" in key:
+            if f"{stage}/" in key and 'confidence' not in key:
                 del self._log[key]
+
         self.num_invalid_gradients = 0
 
 
