@@ -413,10 +413,11 @@ class FlowSiteModule(GeneralModule):
 
             sol.append(xt)
             model_pred.append(x1_pred)
-            if self.args.score_output == "Conf":
-                conf_score = torch.nn.functional.softmax(conf_score, dim=1)[:,1]
-            elif self.args.score_output == "RMSD":
-                conf_score = conf_score.squeeze()
+            if self.args.tfn_score:
+                if self.args.score_output == "Conf":
+                    conf_score = torch.nn.functional.softmax(conf_score, dim=1)[:,1]
+                elif self.args.score_output == "RMSD":
+                    conf_score = conf_score.squeeze()
             confidences.append(conf_score)
             if steps < len(t_span) - 1: dt = t_span[steps + 1] - t
             steps += 1
@@ -593,65 +594,14 @@ class FlowSiteModule(GeneralModule):
         self.stage = "pred"
         logs = {}
         batch.logs = logs
-        prot_bid = batch['protein'].batch.cpu()
-        full_prot_bid = batch['full_protein'].batch.cpu()
-        designed_seqs = []
-        designed_res_list = []
-        logit_seqs = []
-        logit_res_list = []
-        resid_chainid_list = []
         for i in range(self.args.num_inference):
             batch_ = copy.deepcopy(batch)
             if self.args.flow_matching:
-                x1_out, x1, res_pred = self.flow_match_inference(batch_, batch_idx, production_mode=True)
+                x1_out, x1, res_pred, conf_score = self.flow_match_inference(batch_, batch_idx, production_mode=True)
             else:
-                x1_out, x1, res_pred = self.harmonic_inference(batch_, batch_idx)
-            full_designed_mask = torch.logical_and(batch['full_protein'].designable_mask, batch['full_protein'].pocket_mask)
-            assert full_designed_mask.sum() == batch['protein'].designable_mask.sum()
+                x1_out, x1, res_pred, conf_score = self.harmonic_inference(batch_, batch_idx)
 
-            # get the full sequence with the designed residues inserted
-            designed_seq = batch['full_protein'].aatype_num.clone()
-            designed_res = torch.argmax(res_pred[batch['protein'].designable_mask], dim=1)
-            if (designed_res == len(RESTYPES)).any():
-                print('Warning: miscallenaeous token predicted, not including that in the redesigned sequence')
-            designed_res[designed_res == len(RESTYPES)] = batch['protein'].aatype_num[batch['protein'].designable_mask][designed_res == len(RESTYPES)] # do not redisign residues if miscallenaeous token is predicted
-            designed_seq[full_designed_mask] = designed_res
-            designed_seqs.append([np.array(RESTYPES)[designed_seq.cpu().numpy()][torch.where(full_prot_bid == i)] for i in range(len(batch.pdb_id))])
-
-            # get the full sequence of logitidences/logits with the designed residues inserted
-            logit_seq = np.zeros((len(batch['full_protein'].pos), len(atom_features_list['residues_canonical'])))
-            logit_seq[full_designed_mask.cpu()] = res_pred[batch['protein'].designable_mask].cpu().numpy()
-            logit_seqs.append([logit_seq[torch.where(full_prot_bid == i)] for i in range(len(batch.pdb_id))])
-
-            # get the individual designed residues / logitidences
-            designed_res_list.append([np.array(RESTYPES)[designed_res.cpu().numpy()][torch.where(prot_bid[batch['protein'].designable_mask.cpu()] == i)] for i in range(len(batch.pdb_id))])
-            logit_res_list.append([res_pred[batch['protein'].designable_mask].cpu().numpy()[torch.where(prot_bid[batch['protein'].designable_mask.cpu()] == i)] for i in range(len(batch.pdb_id))])
-            chain_id_letters = np.array(list('ACDEFGHIKLMNPQRSTVWY'))[batch['protein'].pdb_chain_id[batch['protein'].designable_mask.cpu()].cpu().numpy()]
-            res_id_chars = batch['protein'].pdb_res_id[batch['protein'].designable_mask].cpu().numpy().astype(str)
-            resid_chainid_list.append([np.char.add(chain_id_letters,res_id_chars)[torch.where(prot_bid[batch['protein'].designable_mask.cpu()] == i)] for i in range(len(batch.pdb_id))])
-
-        # transpose list of lists
-        designed_seqs = list(map(list, zip(*designed_seqs)))
-        logit_seqs = list(map(list, zip(*logit_seqs)))
-        designed_res_list = list(map(list, zip(*designed_res_list)))
-        logit_res_list = list(map(list, zip(*logit_res_list)))
-        resid_chainid_list = list(map(list, zip(*resid_chainid_list)))
-
-        # write output to files
-        for i in range(batch.num_graphs):
-            sample_out_dir = os.path.join(self.args.out_dir, batch.pdb_id[i])
-            os.makedirs(sample_out_dir, exist_ok=True)
-            with open(os.path.join(sample_out_dir, 'full_sequences.csv'), 'w') as f:
-                writer = csv.writer(f)
-                writer.writerow(['sequence'])
-                writer.writerows([[''.join(seq)] for seq in designed_seqs[i]])
-            with open(os.path.join(sample_out_dir, 'designed_residues.csv'), 'w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow(resid_chainid_list[i][0])
-                writer.writerows(designed_res_list[i])
-            np.save(os.path.join(sample_out_dir, 'designed_logits.npy'), np.stack(logit_res_list[i]))
-            np.save(os.path.join(sample_out_dir, 'full_sequence_logits.npy'), np.stack(logit_seqs[i]))
-        return designed_seqs, designed_res_list, logit_seqs, logit_res_list, resid_chainid_list
+        return x1_out, x1, res_pred, conf_score
 
     def on_predict_epoch_end(self):
         log = self._log

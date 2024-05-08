@@ -92,7 +92,7 @@ class ComplexDataset(Dataset):
         assert len(valid_complex_paths) == len(lig_sizes)
         assert len(valid_complex_paths) > 0
         lg(f'Finished loading combined data of length: {len(valid_complex_paths)}')
-        if args.biounit1_only and self.data_source == 'moad':
+        if self.data_source == 'moad' and args.biounit1_only:
             filter_mask = [idx for idx, (path, size) in enumerate(zip(valid_complex_paths, lig_sizes)) if 'unit1' in path]
             filtered_paths, filtered_sizes, filtered_contacts = valid_complex_paths[filter_mask], lig_sizes[filter_mask], num_contacts[filter_mask]
             lg(f'Finished filtering for biounit1 to remain with: {len(filtered_paths)}')

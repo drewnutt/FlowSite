@@ -24,9 +24,10 @@ from utils.simdesign_utils import gather_nodes, _dihedrals, _orientations_coarse
 
 
 class FlowSiteModel(nn.Module):
-    def __init__(self, args):
+    def __init__(self, args, confidence_mode=False):
         super(FlowSiteModel, self).__init__()
         self.args = args
+        self.confidence_mode = confidence_mode
         fold_dim = args.fold_dim
         num_inv_layers = args.num_inv_layers
         atom_feature_dims, edge_feature_dims, lig_bond_feature_dims, rec_feature_dims = get_feature_dims()
@@ -60,10 +61,27 @@ class FlowSiteModel(nn.Module):
             if not args.drop_tfn_feat:
                 self.lig_tfn2inv = nn.Sequential(Linear(args.ns, args.ns), nn.ReLU(), Linear(args.ns, fold_dim))
                 self.rec_tfn2inv = nn.Sequential(Linear(args.ns, args.ns), nn.ReLU(), Linear(args.ns, fold_dim))
-            if self.args.tfn_score:
+            if not confidence_mode and self.args.tfn_score:
                 self.score_module = ReadoutTFNLayer(args)
                 assert self.args.tfn_score and self.args.confidence_loss_weight > 0, "If you want to use tfn_score, you must also use confidence_loss_weight > 0"
         assert not ((args.time_condition_inv or args.time_condition_tfn) and args.ignore_lig), "It does not make sense to use time conditioning without the ligand and therefore without diffusion."
+
+        if confidence_mode:
+            output_confidence_dim = self.args.num_confidence_outputs
+            if self.args.diffdock_confidence:
+                self.confidence_predictor = nn.Sequential(
+                    nn.Linear(2 * args.ns if args.num_tfn_layers >= 3 else args.ns, args.ns),
+                    nn.BatchNorm1d(args.ns) if not args.confidence_no_batchnorm else nn.Identity(),
+                    nn.ReLU(),
+                    nn.Dropout(args.confidence_dropout),
+                    nn.Linear(args.ns, args.ns),
+                    nn.BatchNorm1d(args.ns) if not args.confidence_no_batchnorm else nn.Identity(),
+                    nn.ReLU(),
+                    nn.Dropout(args.confidence_dropout),
+                    nn.Linear(args.ns, output_confidence_dim)
+                )
+            else:
+                self.confidence_predictor = ReadoutTFNLayer(args)
 
     def forward(self, data, x_self=None, x_prior=None):
         if self.args.use_tfn:
@@ -71,8 +89,16 @@ class FlowSiteModel(nn.Module):
             if self.args.tfn_detach:
                 lig_na_tfn, rec_na_tfn = lig_na_tfn.detach(), rec_na_tfn.detach()
             data['ligand'].pos = lig_pos_stack[-1].detach()
-            if self.args.tfn_score:
+            if not self.confidence_mode and self.args.tfn_score:
                 pose_score = self.score_module(lig_na_tfn, data)
+
+        if self.confidence_mode:
+            if self.args.diffdock_confidence:
+                scalar_lig_attr = torch.cat([lig_na_tfn[:,:self.ns],lig_na_tfn[:,-self.ns:]], dim=1) if self.args.num_tfn_layers >= 3 else lig_na_tfn[:,:self.ns]
+                confidence = self.confidence_predictor(scatter_mean(scalar_lig_attr, data['ligand'].batch, dim=0)).squeeze(dim=-1)
+            else:
+                confidence = self.confidence_predictor(lig_na_tfn, data)
+            return confidence
 
         if self.args.use_inv: # not used during docking
             if self.args.ignore_lig:
