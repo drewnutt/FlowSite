@@ -19,6 +19,9 @@ inference_out_dir_not_specified
 .DS_store
 renew.sh
 tmux_renew.sh
+*.slurm
+*.ckpt
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -99,6 +102,7 @@ local_config_inference2.yml
 
 
 *.zip
+*.tar.gz
 Ala2TSF300.npy
 .idea/
 
